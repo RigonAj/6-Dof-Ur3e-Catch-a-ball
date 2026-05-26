@@ -57,6 +57,12 @@ parser.add_argument(
     help="The RL algorithm used for training the skrl agent.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--eval_episodes",
+    type=int,
+    default=0,
+    help="Run headless evaluation for N completed episodes and print the success rate.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -65,6 +71,11 @@ args_cli, hydra_args = parser.parse_known_args()
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
+if args_cli.eval_episodes > 0:
+    args_cli.video = False
+    args_cli.headless = True
+    args_cli.livestream = 0
+    args_cli.enable_cameras = False
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
@@ -171,10 +182,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    base_env = env.unwrapped
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)
+        base_env = env.unwrapped
 
     # get environment (step) dt for real-time evaluation
     try:
@@ -207,10 +220,56 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     print(f"[INFO] Loading model checkpoint from: {resume_path}")
     runner.agent.load(resume_path)
     # set agent to evaluation mode
-    runner.agent.set_running_mode("eval")
+    if hasattr(runner.agent, "set_running_mode"):
+        runner.agent.set_running_mode("eval")
+    else:
+        runner.agent.enable_training_mode(False, apply_to_models=True)
 
     # reset environment
     obs, _ = env.reset()
+    if args_cli.eval_episodes > 0:
+        completed_episodes = 0
+        successful_episodes = 0
+        total_steps = 0
+        start_time = time.time()
+        print(f"[INFO] Evaluating {args_cli.eval_episodes} episodes headless...")
+        while simulation_app.is_running() and completed_episodes < args_cli.eval_episodes:
+            with torch.inference_mode():
+                outputs = runner.agent.act(obs, None, timestep=0, timesteps=0)
+                if hasattr(env, "possible_agents"):
+                    actions = {a: outputs[-1][a].get("mean_actions", outputs[0][a]) for a in env.possible_agents}
+                else:
+                    actions = outputs[-1].get("mean_actions", outputs[0])
+                obs, _, terminated, truncated, extras = env.step(actions)
+
+            done = (terminated | truncated).view(-1)
+            done_ids = done.nonzero(as_tuple=False).squeeze(-1)
+            if done_ids.numel() > 0:
+                remaining = args_cli.eval_episodes - completed_episodes
+                done_ids = done_ids[:remaining]
+                success_buf = getattr(base_env, "_last_done_success", extras.get("success", None))
+                if success_buf is None:
+                    raise RuntimeError("Evaluation requires the environment to expose a success buffer.")
+                successful_episodes += int(success_buf[done_ids].sum().item())
+                completed_episodes += int(done_ids.numel())
+
+                if completed_episodes % 100 == 0 or completed_episodes == args_cli.eval_episodes:
+                    success_rate = 100.0 * successful_episodes / completed_episodes
+                    print(
+                        f"[EVAL] episodes={completed_episodes}/{args_cli.eval_episodes} "
+                        f"successes={successful_episodes} success_rate={success_rate:.2f}%"
+                    )
+            total_steps += 1
+
+        elapsed = time.time() - start_time
+        success_rate = 100.0 * successful_episodes / max(completed_episodes, 1)
+        print(
+            f"[EVAL] done: episodes={completed_episodes} successes={successful_episodes} "
+            f"success_rate={success_rate:.2f}% steps={total_steps} elapsed={elapsed:.2f}s"
+        )
+        env.close()
+        return
+
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
@@ -219,7 +278,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
-            outputs = runner.agent.act(obs, timestep=0, timesteps=0)
+            outputs = runner.agent.act(obs, None, timestep=0, timesteps=0)
             # - multi-agent (deterministic) actions
             if hasattr(env, "possible_agents"):
                 actions = {a: outputs[-1][a].get("mean_actions", outputs[0][a]) for a in env.possible_agents}
