@@ -98,6 +98,11 @@ logs/skrl/cartpole_direct/
 
 The directory name is inherited from the original template config.
 
+## Results
+
+The current trained policy reaches about **98% success rate** in headless evaluation with ball spawn
+noise enabled at `ball_position_noise_std = 0.05`, i.e. a 5 cm Gaussian standard deviation.
+
 ## Play
 
 To run the latest checkpoint found by `script.zsh`:
