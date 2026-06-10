@@ -143,6 +143,57 @@ evaluate
 
 The reported success rate is cumulative over all completed episodes.
 
+## Export and Action Rollouts
+
+To export the trained SKRL checkpoint as a deterministic inference policy and save its metadata:
+
+```bash
+HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/play.py \
+  --task Template-Firsttraining-Direct-v0 \
+  --num_envs=1 \
+  --checkpoint logs/skrl/cartpole_direct/2026-05-26_17-13-29_ppo_torch/checkpoints/best_agent.pt \
+  --headless \
+  --livestream 0 \
+  --rendering_mode performance \
+  --export_policy \
+  --export_onnx
+```
+
+This writes files under:
+
+```text
+logs/skrl/cartpole_direct/2026-05-26_17-13-29_ppo_torch/exports/
+```
+
+To simulate 10 completed episodes and save every policy action:
+
+```bash
+HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/play.py \
+  --task Template-Firsttraining-Direct-v0 \
+  --num_envs=1 \
+  --checkpoint logs/skrl/cartpole_direct/2026-05-26_17-13-29_ppo_torch/checkpoints/best_agent.pt \
+  --headless \
+  --livestream 0 \
+  --rendering_mode performance \
+  --record_actions \
+  --record_episodes=10
+```
+
+The rollout JSON contains one list per completed episode. Each sample includes the 33-D observation,
+the 6-D normalized policy action, and the scaled UR3e joint position target:
+
+```text
+joint_position_target_rad = action_normalized * action_scale
+```
+
+For this task, `action_scale = 0.5`, `joint_names` are ordered as the UR3e arm joints in the
+environment config, and the policy step interval is written as `dt_s` in the JSON metadata. Treat these
+recorded targets as simulation commands; validate limits, timing, collision behavior, and an emergency
+stop path before sending any replay to a real UR3e.
+
+For the recommended real-robot replay workflow using the Universal Robots ROS 2 driver, see
+[UR3e Real-Robot Replay Guide](docs/ur3e_real_robot_replay.md).
+
 ## Useful Configuration
 
 Most task parameters are in:

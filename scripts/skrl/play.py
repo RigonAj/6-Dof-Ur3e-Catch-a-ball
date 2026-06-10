@@ -63,15 +63,64 @@ parser.add_argument(
     default=0,
     help="Run headless evaluation for N completed episodes and print the success rate.",
 )
+parser.add_argument(
+    "--export_policy",
+    action="store_true",
+    default=False,
+    help="Export the loaded deterministic policy as TorchScript. Use with --export_onnx for ONNX too.",
+)
+parser.add_argument(
+    "--export_onnx",
+    action="store_true",
+    default=False,
+    help="Also export the loaded deterministic policy as ONNX. Requires --export_policy.",
+)
+parser.add_argument(
+    "--export_dir",
+    type=str,
+    default=None,
+    help="Directory for exported model files. Defaults to <run_dir>/exports.",
+)
+parser.add_argument(
+    "--record_actions",
+    action="store_true",
+    default=False,
+    help="Run completed episodes and save per-step policy actions for replay/robot-side testing.",
+)
+parser.add_argument(
+    "--record_episodes",
+    type=int,
+    default=10,
+    help="Number of completed episodes to save when --record_actions is used.",
+)
+parser.add_argument(
+    "--record_actions_path",
+    type=str,
+    default=None,
+    help="Output JSON path for recorded actions. Defaults to <run_dir>/exports/rollouts_<N>_episodes.json.",
+)
+parser.add_argument(
+    "--record_max_steps",
+    type=int,
+    default=0,
+    help="Optional safety cap on total simulator steps while recording actions. 0 means no extra cap.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.export_onnx:
+    args_cli.export_policy = True
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
 if args_cli.eval_episodes > 0:
+    args_cli.video = False
+    args_cli.headless = True
+    args_cli.livestream = 0
+    args_cli.enable_cameras = False
+if args_cli.record_actions:
     args_cli.video = False
     args_cli.headless = True
     args_cli.livestream = 0
@@ -85,6 +134,7 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import json
 import os
 import random
 import time
@@ -135,6 +185,174 @@ else:
     algorithm = agent_cfg_entry_point.split("_cfg")[0].split("skrl_")[-1].lower()
 
 
+def _select_deterministic_actions(agent, env, obs):
+    outputs = agent.act(obs, None, timestep=0, timesteps=0)
+    if hasattr(env, "possible_agents"):
+        return {
+            agent_id: outputs[-1][agent_id].get("mean_actions", outputs[0][agent_id])
+            for agent_id in env.possible_agents
+        }
+    return outputs[-1].get("mean_actions", outputs[0])
+
+
+def _tensor_row_to_list(tensor: torch.Tensor, row: int) -> list[float]:
+    return tensor[row].detach().cpu().tolist()
+
+
+def _success_buffer(base_env, extras):
+    success = getattr(base_env, "_last_done_success", None)
+    if success is None and isinstance(extras, dict):
+        success = extras.get("success", None)
+    return success
+
+
+class _DeterministicSkrlPolicy(torch.nn.Module):
+    """Thin trace wrapper around SKRL's eval-time deterministic action path."""
+
+    def __init__(self, agent):
+        super().__init__()
+        self.agent = agent
+
+        # Register known torch modules so tracing/ONNX export can see parameters owned by SKRL.
+        models = getattr(agent, "models", {})
+        if isinstance(models, dict):
+            self._skrl_models = torch.nn.ModuleDict(
+                {name: model for name, model in models.items() if isinstance(model, torch.nn.Module)}
+            )
+        for name in (
+            "state_preprocessor",
+            "_state_preprocessor",
+            "observation_preprocessor",
+            "_observation_preprocessor",
+        ):
+            module = getattr(agent, name, None)
+            if isinstance(module, torch.nn.Module):
+                self.add_module(f"_skrl_{name}", module)
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        outputs = self.agent.act(observations, None, timestep=0, timesteps=0)
+        return outputs[-1].get("mean_actions", outputs[0])
+
+
+def _export_policy(agent, sample_obs: torch.Tensor, export_dir: str, export_onnx: bool, metadata: dict) -> None:
+    os.makedirs(export_dir, exist_ok=True)
+    wrapper = _DeterministicSkrlPolicy(agent).eval()
+    sample_obs = sample_obs.detach()
+    torchscript_path = os.path.join(export_dir, "policy_deterministic.ts")
+    metadata_path = os.path.join(export_dir, "policy_metadata.json")
+
+    with torch.inference_mode():
+        traced = torch.jit.trace(wrapper, sample_obs, strict=False, check_trace=False)
+        traced.save(torchscript_path)
+    print(f"[EXPORT] TorchScript deterministic policy: {torchscript_path}")
+
+    if export_onnx:
+        onnx_path = os.path.join(export_dir, "policy_deterministic.onnx")
+        torch.onnx.export(
+            wrapper,
+            sample_obs,
+            onnx_path,
+            input_names=["observations"],
+            output_names=["actions"],
+            dynamic_axes={"observations": {0: "batch"}, "actions": {0: "batch"}},
+            opset_version=17,
+        )
+        print(f"[EXPORT] ONNX deterministic policy: {onnx_path}")
+
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2)
+    print(f"[EXPORT] Policy metadata: {metadata_path}")
+
+
+def _record_action_rollouts(
+    agent,
+    env,
+    base_env,
+    obs,
+    output_path: str,
+    episodes_to_record: int,
+    action_scale: float,
+    dt: float,
+    metadata: dict,
+    max_steps: int,
+) -> None:
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    num_envs = int(getattr(env, "num_envs", base_env.num_envs))
+    buffers = [[] for _ in range(num_envs)]
+    episode_step = [0 for _ in range(num_envs)]
+    episodes = []
+    total_steps = 0
+    last_reported_episodes = 0
+
+    print(f"[RECORD] Recording {episodes_to_record} completed episodes to: {output_path}")
+    while simulation_app.is_running() and len(episodes) < episodes_to_record:
+        if max_steps > 0 and total_steps >= max_steps:
+            raise RuntimeError(
+                f"Stopped after --record_max_steps={max_steps} with only {len(episodes)} completed episodes."
+            )
+
+        with torch.inference_mode():
+            actions = _select_deterministic_actions(agent, env, obs)
+            if isinstance(actions, dict):
+                raise RuntimeError("Action recording currently expects a single-agent tensor action space.")
+
+            joint_pos = base_env.robot.data.joint_pos[:, base_env._arm_dof_idx]
+            joint_vel = base_env.robot.data.joint_vel[:, base_env._arm_dof_idx]
+            joint_targets = actions * action_scale
+
+            step_records = []
+            for env_id in range(num_envs):
+                record = {
+                    "step": episode_step[env_id],
+                    "time_s": episode_step[env_id] * dt,
+                    "observation": _tensor_row_to_list(obs, env_id),
+                    "action_normalized": _tensor_row_to_list(actions, env_id),
+                    "joint_position_target_rad": _tensor_row_to_list(joint_targets, env_id),
+                    "joint_position_before_rad": _tensor_row_to_list(joint_pos, env_id),
+                    "joint_velocity_before_rad_s": _tensor_row_to_list(joint_vel, env_id),
+                }
+                buffers[env_id].append(record)
+                step_records.append(record)
+
+            obs, rewards, terminated, truncated, extras = env.step(actions)
+
+        done = (terminated | truncated).view(-1)
+        success = _success_buffer(base_env, extras)
+        for env_id, record in enumerate(step_records):
+            record["reward"] = float(rewards.view(-1)[env_id].detach().cpu().item())
+            record["terminated"] = bool(terminated.view(-1)[env_id].detach().cpu().item())
+            record["truncated"] = bool(truncated.view(-1)[env_id].detach().cpu().item())
+
+            if bool(done[env_id].detach().cpu().item()):
+                episode = {
+                    "episode_index": len(episodes),
+                    "source_env_index": env_id,
+                    "success": bool(success[env_id].detach().cpu().item()) if success is not None else None,
+                    "steps": len(buffers[env_id]),
+                    "samples": buffers[env_id],
+                }
+                episodes.append(episode)
+                buffers[env_id] = []
+                episode_step[env_id] = 0
+                if len(episodes) >= episodes_to_record:
+                    break
+            else:
+                episode_step[env_id] += 1
+
+        total_steps += 1
+        if len(episodes) % 5 == 0 and len(episodes) > 0 and len(episodes) != last_reported_episodes:
+            last_reported_episodes = len(episodes)
+            print(f"[RECORD] completed episodes={len(episodes)}/{episodes_to_record}")
+
+    payload = {
+        "metadata": metadata,
+        "episodes": episodes[:episodes_to_record],
+    }
+    with open(output_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2)
+    print(f"[RECORD] Saved {len(payload['episodes'])} episodes to: {output_path}")
+
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, experiment_cfg: dict):
     """Play with skrl agent."""
@@ -143,7 +361,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     train_task_name = task_name.replace("-Play", "")
 
     # override configurations with non-hydra CLI arguments
-    env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.record_actions and args_cli.num_envs is None:
+        env_cfg.scene.num_envs = 1
+    else:
+        env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
     # configure the ML framework into the global skrl variable
@@ -227,6 +448,52 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
 
     # reset environment
     obs, _ = env.reset()
+
+    export_dir = os.path.abspath(args_cli.export_dir) if args_cli.export_dir else os.path.join(log_dir, "exports")
+    joint_names = list(getattr(base_env.cfg, "joint_names", []))
+    action_scale = float(getattr(base_env.cfg, "action_scale", 1.0))
+    metadata = {
+        "task": args_cli.task,
+        "checkpoint": resume_path,
+        "log_dir": log_dir,
+        "ml_framework": args_cli.ml_framework,
+        "algorithm": algorithm,
+        "dt_s": float(dt),
+        "num_envs": int(getattr(env, "num_envs", base_env.num_envs)),
+        "observation_space": int(getattr(base_env.cfg, "observation_space", 0)),
+        "action_space": int(getattr(base_env.cfg, "action_space", 0)),
+        "action_scale": action_scale,
+        "joint_names": joint_names,
+        "action_semantics": "joint_position_target_rad = action_normalized * action_scale",
+    }
+
+    if args_cli.export_policy:
+        _export_policy(runner.agent, obs, export_dir, args_cli.export_onnx, metadata)
+        if not args_cli.record_actions and args_cli.eval_episodes <= 0 and not args_cli.video:
+            env.close()
+            return
+
+    if args_cli.record_actions:
+        record_path = (
+            os.path.abspath(args_cli.record_actions_path)
+            if args_cli.record_actions_path
+            else os.path.join(export_dir, f"rollouts_{args_cli.record_episodes}_episodes.json")
+        )
+        _record_action_rollouts(
+            runner.agent,
+            env,
+            base_env,
+            obs,
+            record_path,
+            args_cli.record_episodes,
+            action_scale,
+            float(dt),
+            metadata,
+            args_cli.record_max_steps,
+        )
+        env.close()
+        return
+
     if args_cli.eval_episodes > 0:
         completed_episodes = 0
         successful_episodes = 0

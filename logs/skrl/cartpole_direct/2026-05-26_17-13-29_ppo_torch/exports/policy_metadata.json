@@ -1,0 +1,21 @@
+{
+  "task": "Template-Firsttraining-Direct-v0",
+  "checkpoint": "/home/rigon/Documents/IsaacTrain/Cartpole/Cartpole/FirstTraining/logs/skrl/cartpole_direct/2026-05-26_17-13-29_ppo_torch/checkpoints/best_agent.pt",
+  "log_dir": "/home/rigon/Documents/IsaacTrain/Cartpole/Cartpole/FirstTraining/logs/skrl/cartpole_direct/2026-05-26_17-13-29_ppo_torch",
+  "ml_framework": "torch",
+  "algorithm": "ppo",
+  "dt_s": 0.016666666666666666,
+  "num_envs": 1,
+  "observation_space": 33,
+  "action_space": 6,
+  "action_scale": 0.5,
+  "joint_names": [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint"
+  ],
+  "action_semantics": "joint_position_target_rad = action_normalized * action_scale"
+}
