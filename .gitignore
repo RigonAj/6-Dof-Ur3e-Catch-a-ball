@@ -75,3 +75,8 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# ROS 2 local workspace artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/

@@ -14,6 +14,39 @@ The model/export metadata is:
 logs/skrl/cartpole_direct/2026-05-26_17-13-29_ppo_torch/exports/policy_metadata.json
 ```
 
+## Repo Tools
+
+This repository now includes a ROS 2 Humble replay package:
+
+```text
+ros2_ws/src/ur3e_rollout_replay
+```
+
+It provides two commands:
+
+```bash
+ros2 run ur3e_rollout_replay ur3e_replay_validate
+ros2 run ur3e_rollout_replay ur3e_replay_send
+```
+
+`ur3e_replay_validate` checks the rollout schema, joint order, raw timing, and retimed safety limits. The raw Isaac timestep is intentionally not used directly for physical replay; the command retimes the motion against conservative defaults.
+
+`ur3e_replay_send` reads `/joint_states`, prepends a slow approach from the measured robot pose to the first rollout target, builds a `FollowJointTrajectory` goal, and only sends it when `--execute` is passed.
+
+There is also a browser UI (`ros2 run ur3e_web_ui ur3e_web_ui`) with a live 3D model, jog control, TCP pose readout, and a rollout tab that validates, previews (ghost animation, no robot motion), and executes the same episodes. See `docs/ur3e_web_ui.md`.
+
+For the architecture of the complete robot-control stack, see `docs/ur3e_robot_control_architecture.md`.
+
+For the current ROS 2 Humble driver setup and Ethernet fix, see:
+
+```text
+docs/ur3e_current_driver_setup.md
+```
+
+The previous legacy-source-driver path is kept in `docs/ur3e_legacy_driver_setup.md` only for reference. The recommended path now uses the current `ros-humble-ur` binary packages.
+
+First build and test against mock hardware before connecting the real arm.
+
 ## What the Actions Mean
 
 Each rollout sample contains two action fields:
@@ -127,8 +160,8 @@ Do not immediately start the policy motion from an arbitrary real robot pose. Fi
 Recommended first-pass timing:
 
 - Approach duration: 5 to 10 seconds.
-- Replay timestep: use the rollout `dt_s` only after the approach segment.
-- First physical test: slow the whole trajectory down by 3x to 5x.
+- Replay timing: do not use the raw rollout `dt_s` directly on hardware.
+- First physical test: use the replay node's conservative retiming defaults.
 
 Minimal replay logic:
 

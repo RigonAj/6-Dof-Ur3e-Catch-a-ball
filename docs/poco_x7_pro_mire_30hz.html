@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#000000">
+  <title>Mire 30 Hz</title>
+  <style>
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+      color: #f4f4f4;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      touch-action: none;
+      overscroll-behavior: none;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: #000;
+    }
+
+    #panel {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: #050505;
+      z-index: 2;
+    }
+
+    #panel-inner {
+      width: min(92vw, 460px);
+      border: 1px solid #2b2b2b;
+      background: #111;
+      padding: 18px;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 8px 0;
+      color: #d2d2d2;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 12px;
+      margin: 14px 0;
+      font-size: 13px;
+      color: #dcdcdc;
+    }
+
+    dt {
+      color: #9c9c9c;
+    }
+
+    dd {
+      margin: 0;
+      text-align: right;
+    }
+
+    button {
+      width: 100%;
+      margin-top: 12px;
+      border: 0;
+      border-radius: 6px;
+      background: #fff;
+      color: #000;
+      font: inherit;
+      font-size: 16px;
+      font-weight: 700;
+      padding: 14px 16px;
+    }
+
+    #panel.hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="mire"></canvas>
+
+  <div id="panel">
+    <div id="panel-inner">
+      <h1>Mire Poco X7 Pro</h1>
+      <p>Appuyer sur demarrer, passer le telephone en plein ecran, puis le placer devant la DVXplorer.</p>
+      <dl>
+        <dt>Frequence</dt><dd><span id="hz-label">30</span> Hz</dd>
+        <dt>Points</dt><dd>19/20</dd>
+        <dt>Ecran</dt><dd>69.55 x 154.50 mm</dd>
+        <dt>Pattern</dt><dd>4 x 5, manque (1,2)</dd>
+      </dl>
+      <button id="start">Demarrer</button>
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+
+    const ROWS = 4;
+    const COLS = 5;
+    const MISSING_DOT = [1, 2];
+    const ANCHOR_DOT = [0, 0];
+    const DEFAULT_HZ = 30;
+    const DEFAULT_SOFTNESS = 55;
+
+    const params = new URLSearchParams(window.location.search);
+    const blinkHz = readNumberParam("hz", DEFAULT_HZ, 1, 60);
+    const softness = readNumberParam("soft", DEFAULT_SOFTNESS, 0, 100) / 100;
+
+    const canvas = document.getElementById("mire");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const panel = document.getElementById("panel");
+    const startButton = document.getElementById("start");
+    document.getElementById("hz-label").textContent = blinkHz.toFixed(1).replace(".0", "");
+
+    let dots = [];
+    let running = false;
+    let lastLit = null;
+    let wakeLock = null;
+
+    function readNumberParam(name, fallback, min, max) {
+      const raw = params.get(name);
+      const value = raw === null ? fallback : Number(raw);
+      if (!Number.isFinite(value)) return fallback;
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const widthCss = window.innerWidth;
+      const heightCss = window.innerHeight;
+      canvas.width = Math.max(1, Math.round(widthCss * dpr));
+      canvas.height = Math.max(1, Math.round(heightCss * dpr));
+      canvas.style.width = widthCss + "px";
+      canvas.style.height = heightCss + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      buildDots(widthCss, heightCss);
+      lastLit = null;
+      draw(false);
+    }
+
+    function buildDots(width, height) {
+      const spacing = 0.82 * Math.min(width / (COLS - 1), height / (ROWS - 1));
+      const centerX = width * 0.5;
+      const centerY = height * 0.5;
+      const smallRadius = spacing * 0.17;
+      const anchorRadius = spacing * 0.285;
+
+      dots = [];
+      for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+          if (row === MISSING_DOT[0] && col === MISSING_DOT[1]) continue;
+          const x = centerX + (col - (COLS - 1) * 0.5) * spacing;
+          const y = centerY + (row - (ROWS - 1) * 0.5) * spacing;
+          const anchor = row === ANCHOR_DOT[0] && col === ANCHOR_DOT[1];
+          dots.push({ x, y, radius: anchor ? anchorRadius : smallRadius });
+        }
+      }
+    }
+
+    function draw(lit) {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, width, height);
+      if (!lit) return;
+
+      const innerStop = 0.85 - 0.65 * softness;
+      const midStop = 0.96 - 0.24 * softness;
+      const midValue = Math.round(245 - 145 * softness);
+      const midColor = "rgb(" + midValue + "," + midValue + "," + midValue + ")";
+
+      for (const dot of dots) {
+        const gradient = ctx.createRadialGradient(dot.x, dot.y, 0, dot.x, dot.y, dot.radius);
+        gradient.addColorStop(0.0, "#fff");
+        gradient.addColorStop(innerStop, "#fff");
+        gradient.addColorStop(midStop, midColor);
+        gradient.addColorStop(1.0, "#000");
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(dot.x, dot.y, dot.radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function animate(now) {
+      if (!running) return;
+      const halfPeriodMs = 1000 / (blinkHz * 2);
+      const lit = Math.floor(now / halfPeriodMs) % 2 === 0;
+      if (lit !== lastLit) {
+        draw(lit);
+        lastLit = lit;
+      }
+      window.requestAnimationFrame(animate);
+    }
+
+    async function requestWakeLock() {
+      if (!("wakeLock" in navigator)) return;
+      try {
+        wakeLock = await navigator.wakeLock.request("screen");
+      } catch (_error) {
+        wakeLock = null;
+      }
+    }
+
+    async function start() {
+      resizeCanvas();
+      try {
+        if (document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch (_error) {
+        // Some mobile browsers reject fullscreen for local files. The target still runs.
+      }
+      await requestWakeLock();
+      panel.classList.add("hidden");
+      running = true;
+      window.requestAnimationFrame(animate);
+    }
+
+    startButton.addEventListener("click", start);
+    window.addEventListener("resize", resizeCanvas);
+    window.addEventListener("orientationchange", () => window.setTimeout(resizeCanvas, 250));
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && running) requestWakeLock();
+    });
+
+    resizeCanvas();
+  </script>
+</body>
+</html>
