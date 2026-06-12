@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UR3e Control</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+      "three/examples/jsm/": "https://unpkg.com/three@0.158.0/examples/jsm/",
+      "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/",
+      "urdf-loader": "https://unpkg.com/urdf-loader@0.12.6/src/URDFLoader.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <header>
+    <h1>UR3e Control</h1>
+    <div id="badges">
+      <span class="badge" id="badge-joints">joints: –</span>
+      <span class="badge" id="badge-action">controller: –</span>
+      <span class="badge" id="badge-program">program: –</span>
+      <span class="badge" id="badge-speed">speed: –</span>
+      <span class="badge" id="badge-ik">ik: –</span>
+      <span class="badge" id="badge-urdf">urdf: –</span>
+    </div>
+  </header>
+
+  <div id="banner" class="hidden"></div>
+
+  <main>
+    <section id="viewer"></section>
+
+    <aside id="panel">
+      <nav id="tabs">
+        <button class="tab active" data-tab="status">Status</button>
+        <button class="tab" data-tab="control">Control</button>
+        <button class="tab" data-tab="target">Target</button>
+        <button class="tab" data-tab="rollout">Rollout</button>
+        <button class="tab" data-tab="calibration">Calibration</button>
+      </nav>
+
+      <div class="tab-page active" id="tab-status">
+        <h2>Joints</h2>
+        <table id="joint-table">
+          <thead><tr><th>Joint</th><th>rad</th><th>deg</th><th>rad/s</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <h2>TCP (base &rarr; tool0)</h2>
+        <table id="tcp-table">
+          <tbody>
+            <tr><th>X</th><td id="tcp-x">–</td><th>Roll</th><td id="tcp-r">–</td></tr>
+            <tr><th>Y</th><td id="tcp-y">–</td><th>Pitch</th><td id="tcp-p">–</td></tr>
+            <tr><th>Z</th><td id="tcp-z">–</td><th>Yaw</th><td id="tcp-yw">–</td></tr>
+          </tbody>
+        </table>
+        <p class="hint">Position in meters, orientation in degrees.</p>
+      </div>
+
+      <div class="tab-page" id="tab-control">
+        <h2>Jog</h2>
+        <div class="row">
+          <label for="jog-step">Step</label>
+          <select id="jog-step">
+            <option value="0.01">0.01 rad (0.6&deg;)</option>
+            <option value="0.05" selected>0.05 rad (2.9&deg;)</option>
+            <option value="0.1">0.10 rad (5.7&deg;)</option>
+            <option value="0.2">0.20 rad (11.5&deg;)</option>
+          </select>
+        </div>
+        <div id="jog-rows"></div>
+        <div class="row gap">
+          <button id="btn-home" class="warn">Move Home</button>
+          <button id="btn-cancel" class="danger">CANCEL MOTION</button>
+        </div>
+        <div id="goal-status" class="goal-status">idle</div>
+        <h2 id="dashboard-title" class="hidden">Dashboard</h2>
+        <div id="dashboard-buttons" class="row gap hidden">
+          <button data-dash="play">Play</button>
+          <button data-dash="stop">Stop</button>
+          <button data-dash="power_on">Power On</button>
+          <button data-dash="power_off">Power Off</button>
+          <button data-dash="brake_release">Brake Release</button>
+        </div>
+      </div>
+
+      <div class="tab-page" id="tab-target">
+        <h2>TCP Target</h2>
+        <div class="settings-grid">
+          <label>
+            <span>X</span>
+            <input id="target-x" type="number" inputmode="decimal" step="0.001">
+            <small>m</small>
+          </label>
+          <label>
+            <span>Y</span>
+            <input id="target-y" type="number" inputmode="decimal" step="0.001">
+            <small>m</small>
+          </label>
+          <label>
+            <span>Z</span>
+            <input id="target-z" type="number" inputmode="decimal" step="0.001">
+            <small>m</small>
+          </label>
+          <label>
+            <span>Duration</span>
+            <input id="target-duration" type="number" inputmode="decimal" min="1" max="30" step="0.1" value="2.0">
+            <small>s</small>
+          </label>
+          <label>
+            <span>Roll</span>
+            <input id="target-roll" type="number" inputmode="decimal" step="0.1">
+            <small>deg</small>
+          </label>
+          <label>
+            <span>Pitch</span>
+            <input id="target-pitch" type="number" inputmode="decimal" step="0.1">
+            <small>deg</small>
+          </label>
+          <label>
+            <span>Yaw</span>
+            <input id="target-yaw" type="number" inputmode="decimal" step="0.1">
+            <small>deg</small>
+          </label>
+        </div>
+        <div class="row gap">
+          <button class="mode-button" data-target-mode="translate">Move XYZ</button>
+          <button class="mode-button" data-target-mode="rotate">Rotate XYZ</button>
+          <button id="btn-target-current">Use TCP</button>
+        </div>
+        <label class="check-row">
+          <input type="checkbox" id="target-avoid-collisions" checked>
+          Avoid collisions
+        </label>
+        <div class="row gap">
+          <button id="btn-target-validate">Validate IK</button>
+          <button id="btn-target-send" class="danger" disabled>Send Goal&hellip;</button>
+        </div>
+        <div id="target-status" class="goal-status">idle</div>
+      </div>
+
+      <div class="tab-page" id="tab-rollout">
+        <h2>Replay Settings</h2>
+        <div class="settings-grid" id="replay-settings">
+          <label>
+            <span>Max velocity</span>
+            <input id="setting-max-joint-velocity" type="number" inputmode="decimal">
+            <small>rad/s</small>
+          </label>
+          <label>
+            <span>Max acceleration</span>
+            <input id="setting-max-joint-acceleration" type="number" inputmode="decimal">
+            <small>rad/s&sup2;</small>
+          </label>
+          <label>
+            <span>Approach min</span>
+            <input id="setting-approach-min-duration" type="number" inputmode="decimal">
+            <small>s</small>
+          </label>
+          <label>
+            <span>Segment min</span>
+            <input id="setting-min-segment-duration" type="number" inputmode="decimal">
+            <small>s</small>
+          </label>
+        </div>
+        <div class="row gap">
+          <button data-replay-preset="safe">Safe</button>
+          <button data-replay-preset="balanced">Balanced</button>
+          <button data-replay-preset="fast">Fast</button>
+          <button id="btn-settings-apply">Apply</button>
+        </div>
+        <label class="check-row">
+          <input type="checkbox" id="setting-preview-approach" checked>
+          Include live approach when validating/previews
+        </label>
+        <div id="settings-status" class="hint"></div>
+        <h2>Episodes</h2>
+        <div id="rollout-meta" class="hint"></div>
+        <table id="episode-table">
+          <thead><tr><th>#</th><th>OK</th><th>Steps</th><th>Replay s</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="plan-stats" class="hidden">
+          <h2>Plan <span id="plan-episode"></span></h2>
+          <table>
+            <thead><tr><th></th><th>Raw</th><th>Retimed</th></tr></thead>
+            <tbody>
+              <tr><th>Max vel (rad/s)</th><td id="st-raw-vel">–</td><td id="st-ret-vel">–</td></tr>
+              <tr><th>Max acc (rad/s&sup2;)</th><td id="st-raw-acc">–</td><td id="st-ret-acc">–</td></tr>
+              <tr><th>Duration (s)</th><td id="st-raw-dur">–</td><td id="st-ret-dur">–</td></tr>
+            </tbody>
+          </table>
+          <div id="plan-limits" class="hint"></div>
+          <div class="row gap">
+            <button id="btn-preview">Preview (3D only)</button>
+            <button id="btn-preview-stop" class="hidden">Stop Preview</button>
+            <button id="btn-execute" class="danger">Execute on Robot&hellip;</button>
+          </div>
+        </div>
+        <div id="exec-progress" class="hidden">
+          <div class="progress"><div id="progress-fill"></div></div>
+          <div id="progress-label"></div>
+        </div>
+      </div>
+      <div class="tab-page" id="tab-calibration">
+        <h2>Calibration Poses</h2>
+        <p class="hint">Hand-eye calibration poses are stored in joint space and replayed
+        identically (no IK surprises). Jog or TCP-target the robot into position, tilt the
+        phone screen toward the camera (&plusmn;25&ndash;40&deg;, vary all three axes), then save.</p>
+        <div class="row gap">
+          <input id="calib-pose-name" type="text" placeholder="pose name (optional)">
+          <button id="btn-calib-save">Save current pose</button>
+        </div>
+        <table id="calib-pose-table">
+          <thead><tr><th>#</th><th>Name</th><th>Joints (deg)</th><th></th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="row gap">
+          <button id="btn-calib-next" disabled>Go to next pose&hellip;</button>
+        </div>
+        <div id="calib-status" class="goal-status">idle</div>
+        <div id="calib-path" class="hint"></div>
+        <h2>Phone Support Ghost</h2>
+        <label class="check-row">
+          <input type="checkbox" id="calib-show-support">
+          Show phone support on tool0
+        </label>
+        <div id="calib-support-status" class="hint"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="modal" class="hidden">
+    <div class="modal-card">
+      <h2>Execute on real robot</h2>
+      <div id="modal-body"></div>
+      <label class="confirm-row">
+        <input type="checkbox" id="modal-confirm">
+        I have verified the robot workspace is clear and an operator is at the E-stop.
+      </label>
+      <div class="row gap">
+        <button id="modal-cancel">Cancel</button>
+        <button id="modal-go" class="danger" disabled>Execute</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/js/main.js?v=calibration-tab"></script>
+</body>
+</html>

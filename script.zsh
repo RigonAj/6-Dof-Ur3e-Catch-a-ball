@@ -47,4 +47,7 @@ alias record="python scripts/skrl/play.py \
 
 alias tensorboard="python -m tensorboard.main --logdir logs/skrl"
 
+alias ur3e_stack="./scripts/launch_ur3e_stack.sh"
+alias ur3e_stop="./scripts/launch_ur3e_stack.sh --stop"
+
 # alias lunch_play_gpu="... --device cuda"  # future multi-gpu
