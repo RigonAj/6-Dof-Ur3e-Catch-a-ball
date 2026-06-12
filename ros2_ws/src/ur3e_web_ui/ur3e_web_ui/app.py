@@ -23,7 +23,12 @@ from ur3e_rollout_replay.replay_core import (
 )
 
 from . import motion
-from .calibration import DEFAULT_POSES_PATH, CalibrationPoseStore
+from .calibration import (
+    DEFAULT_CAMERA_RESULT_PATH,
+    DEFAULT_POSES_PATH,
+    CalibrationPoseStore,
+    load_camera_calibration,
+)
 from .joint_limits import JointLimit, load_ur3e_joint_limits
 from .ros_interface import ActionServerUnavailable, IKFailed, IKServiceUnavailable, MotionBusy, RosBridge
 from .urdf_provider import UR_DESCRIPTION_SHARE
@@ -81,6 +86,7 @@ class Settings:
     limits: SafetyLimits = SafetyLimits()
     home_positions: tuple[float, ...] = motion.HOME_POSITIONS
     calibration_poses_path: str = str(DEFAULT_POSES_PATH)
+    camera_calibration_path: str = str(DEFAULT_CAMERA_RESULT_PATH)
 
 
 class JogRequest(BaseModel):
@@ -488,6 +494,27 @@ def create_app(bridge: RosBridge, settings: Settings) -> FastAPI:
             max_joint_delta_rad=motion.max_joint_delta(pose["joints_rad"], snapshot.joint_positions),
         )
 
+    @app.get("/api/calibration/camera")
+    def calibration_camera() -> dict:
+        path = Path(settings.camera_calibration_path)
+        if not path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=f"no hand-eye result at {path}; run solve_handeye.py --output-yaml first",
+            )
+        try:
+            data = load_camera_calibration(path)
+        except ReplayDataError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+        return {
+            "path": str(path),
+            "created_at": data.get("created_at"),
+            "sample_count": data.get("sample_count"),
+            "T_base_camera": data["T_base_camera"],
+            "T_tool0_mire": data.get("T_tool0_mire"),
+            "validation": data.get("validation"),
+        }
+
     @app.post("/api/calibration/poses/{pose_index}/goto", status_code=202)
     async def calibration_goto(pose_index: int, body: ConfirmRequest) -> dict:
         if not body.confirm:
@@ -774,6 +801,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_POSES_PATH),
         help="JSON file holding the recorded hand-eye calibration joint poses",
     )
+    parser.add_argument(
+        "--camera-calibration",
+        default=str(DEFAULT_CAMERA_RESULT_PATH),
+        help="Hand-eye result YAML (solve_handeye.py --output-yaml) shown in the viewer",
+    )
     return parser
 
 
@@ -795,6 +827,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         home_positions=home,
         calibration_poses_path=args.calibration_poses,
+        camera_calibration_path=args.camera_calibration,
     )
     app = create_app(RosBridge(), settings)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

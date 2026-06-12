@@ -1,5 +1,5 @@
 import { api } from "./api.js";
-import { Viewer3D } from "./viewer3d.js?v=calibration-tab";
+import { Viewer3D } from "./viewer3d.js?v=camera-frame";
 import { JogPanel } from "./jog_panel.js";
 import { TargetPanel } from "./target_panel.js?v=tcp-target-base-frame";
 import { RolloutPanel } from "./rollout_panel.js";

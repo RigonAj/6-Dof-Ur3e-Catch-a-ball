@@ -484,14 +484,26 @@ mentionne dans tous les fichiers de résultat.
   distance vs mesure, séquence « test carré » ;
 - un self-test synthétique (`--self-test`).
 
-Ce qui manque :
+État d'implémentation du plan §10 (2026-06-12) :
 
-- le mode mire **téléphone** (§3) ;
-- la lecture de `T_base_tool0` à la capture (listener tf2, §9) ;
-- l'export JSON **multi-échantillons** appariant robot et caméra (§5) ;
-- le solveur hors-ligne + test synthétique (§4) ;
-- les validations automatiques (§8) ;
-- l'onglet Calibration de l'UI (§10, étape 3).
+- **Étape 0** : `serve_phone_mire.py` + `phone_mire.html` (Dv-Rosws) — la page
+  téléphone dessine le layout servi par `build_mire_layout` (source de vérité
+  unique), détection plein-écran, mode mesure pied à coulisse. Reste la
+  validation matérielle (19/19, RMS < 1 px, distance < 2 %).
+- **Étape 1** : `solve_handeye.py` (Dv-Rosws) — recette §4 vérifiée par
+  `--self-test` (récupération exacte, solveurs croisés, garde anti-mapping
+  naïf, bruit 0,1 mm/0,05°).
+- **Étape 2** : `event_mire_calibration.py --external-mire` — listener tf2,
+  stationnarité début/fin, ambiguïté IPPE, export JSON §5 (+ matches pour le
+  résidu pixel §8).
+- **Étape 3** : onglet Calibration de `ur3e_web_ui` — poses articulaires
+  enregistrées/rejouées, ghost du support sur `tool0`
+  (`static/models/Support3D.glb`, en mètres).
+- **Étape 4** : `run_handeye_session.sh` (Dv-Rosws) lance serveur mire +
+  collecteur ; la session physique reste à faire.
+- **Étape 5** : `scripts/publish_camera_tf.py` (YAML →
+  `static_transform_publisher`, fragment xacro) + `GET /api/calibration/camera`
+  + affichage du repère caméra dans le viewer.
 
 ## 12. Pièges
 

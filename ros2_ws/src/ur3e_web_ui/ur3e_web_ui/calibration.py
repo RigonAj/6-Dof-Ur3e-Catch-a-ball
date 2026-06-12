@@ -7,11 +7,46 @@ from pathlib import Path
 from threading import Lock
 from typing import Sequence
 
+import yaml
+
 from ur3e_rollout_replay.replay_core import DEFAULT_JOINT_NAMES, ReplayDataError
 
 # Relative to the process working directory (the launcher runs from the repo
 # root), so recorded poses are versioned alongside the calibration data.
 DEFAULT_POSES_PATH = Path("calibration/calibration_poses.json")
+# Result written by solve_handeye.py --output-yaml (Dv-Rosws scripts).
+DEFAULT_CAMERA_RESULT_PATH = Path("calibration/handeye_result.yaml")
+
+_TRANSFORM_KEYS = ("parent", "child", "xyz", "quat_xyzw")
+
+
+def load_camera_calibration(path: Path | str) -> dict:
+    """Parse the hand-eye result YAML; raises ReplayDataError when invalid.
+
+    Returns the raw document; T_base_camera is validated (the viewer needs
+    it), T_tool0_mire and validation are passed through when present.
+    """
+    path = Path(path)
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ReplayDataError(f"cannot read camera calibration {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ReplayDataError(f"{path}: not a YAML mapping")
+    transform = data.get("T_base_camera")
+    if not isinstance(transform, dict):
+        raise ReplayDataError(f"{path}: missing T_base_camera")
+    for key in _TRANSFORM_KEYS:
+        if key not in transform:
+            raise ReplayDataError(f"{path}: T_base_camera is missing '{key}'")
+    if len(transform["xyz"]) != 3 or len(transform["quat_xyzw"]) != 4:
+        raise ReplayDataError(f"{path}: T_base_camera needs xyz[3] and quat_xyzw[4]")
+    if not all(
+        isinstance(value, (int, float)) and math.isfinite(value)
+        for value in (*transform["xyz"], *transform["quat_xyzw"])
+    ):
+        raise ReplayDataError(f"{path}: T_base_camera values must be finite numbers")
+    return data
 
 
 class CalibrationPoseStore:
