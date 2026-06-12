@@ -42,12 +42,24 @@ export class CalibrationPanel {
     this.poses.forEach((pose, index) => {
       const joints = pose.joints_rad.map((value) => (value * RAD_TO_DEG).toFixed(0)).join(", ");
       const row = document.createElement("tr");
-      row.innerHTML = `
-        <td>${index === this.nextIndex ? "&#9654; " : ""}${index}</td>
-        <td>${pose.name}</td>
-        <td class="num">${joints}</td>
-        <td><button data-goto="${index}">Go</button></td>
-        <td><button data-del="${index}">&#10005;</button></td>`;
+      const indexCell = document.createElement("td");
+      indexCell.textContent = `${index === this.nextIndex ? "> " : ""}${index}`;
+      const nameCell = document.createElement("td");
+      nameCell.textContent = pose.name;
+      const jointsCell = document.createElement("td");
+      jointsCell.className = "num";
+      jointsCell.textContent = joints;
+      const gotoCell = document.createElement("td");
+      const gotoButton = document.createElement("button");
+      gotoButton.dataset.goto = String(index);
+      gotoButton.textContent = "Go";
+      gotoCell.appendChild(gotoButton);
+      const deleteCell = document.createElement("td");
+      const deleteButton = document.createElement("button");
+      deleteButton.dataset.del = String(index);
+      deleteButton.textContent = "X";
+      deleteCell.appendChild(deleteButton);
+      row.append(indexCell, nameCell, jointsCell, gotoCell, deleteCell);
       tbody.appendChild(row);
     });
     for (const button of tbody.querySelectorAll("button[data-goto]")) {
