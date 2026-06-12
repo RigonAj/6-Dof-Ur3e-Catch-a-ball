@@ -7,6 +7,7 @@ A browser UI for the UR3e served by the `ur3e_web_ui` ROS 2 package:
 - Per-joint jog buttons, move-to-home, and a cancel button. All motion goes through `/scaled_joint_trajectory_controller/follow_joint_trajectory` with positions clamped to the UR3e joint limits.
 - TCP Target tab: movable 3D target frame plus numeric X/Y/Z/Roll/Pitch/Yaw fields; validates with MoveIt `/compute_ik`, previews the IK solution as a ghost robot, then sends a retimed joint trajectory after explicit confirmation.
 - Rollout tab: lists the 10 exported Isaac episodes, validates the retimed plan (same math as `ur3e_replay_validate`), previews the trajectory as a semi-transparent ghost robot (no robot motion), and executes it after explicit confirmation.
+- Calibration tab: records the current joints as named poses (stored in `calibration/calibration_poses.json`, override with `--calibration-poses`), replays them identically for the hand-eye calibration session ("Go" / "Go to next pose", ghost preview + confirmation, same motion gates as TCP targets), and can display the phone-support ghost (`static/models/Support3D.glb`, mount transform in `static/models/support_mount.json`) on `tool0`. Poses are joint-space on purpose — no IK branch surprises (see `docs/ur3e_camera_base_calibration.md` §7).
 - Dashboard buttons (play/stop/power on/off/brake release) appear automatically when the real driver's dashboard client is available.
 
 Troubleshooting history for the original real-robot motion issue is documented in `docs/ur3e_motion_issue_resolution.md`.
@@ -138,6 +139,8 @@ The backend also exposes a JSON API (interactive docs at `/docs`):
 - `GET /api/health`, `GET /api/urdf`, `GET /api/limits`
 - `GET /api/replay_settings`, `POST /api/replay_settings`
 - `POST /api/tcp_target/plan`, `POST /api/tcp_target/execute`
+- `GET/POST /api/calibration/poses`, `DELETE /api/calibration/poses/{i}`,
+  `GET /api/calibration/poses/{i}/plan`, `POST /api/calibration/poses/{i}/goto`
 - `GET /api/rollout`, `GET /api/rollout/{i}/plan?approach=true`
 - `POST /api/jog {"joint": "...", "direction": 1, "step_rad": 0.05}`
 - `POST /api/move_home {"confirm": true}`, `POST /api/cancel`

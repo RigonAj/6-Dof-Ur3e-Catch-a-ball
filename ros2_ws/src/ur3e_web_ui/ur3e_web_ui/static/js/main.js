@@ -1,8 +1,9 @@
 import { api } from "./api.js";
-import { Viewer3D } from "./viewer3d.js?v=tcp-target-base-frame";
+import { Viewer3D } from "./viewer3d.js?v=calibration-tab";
 import { JogPanel } from "./jog_panel.js";
 import { TargetPanel } from "./target_panel.js?v=tcp-target-base-frame";
 import { RolloutPanel } from "./rollout_panel.js";
+import { CalibrationPanel } from "./calibration_panel.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
 
@@ -104,6 +105,7 @@ async function boot() {
   const jogPanel = new JogPanel({ onError });
   const targetPanel = new TargetPanel({ viewer, onError });
   const rolloutPanel = new RolloutPanel({ viewer, onError });
+  const calibrationPanel = new CalibrationPanel({ viewer, onError });
 
   try {
     const { text, source } = await api.urdf();
@@ -121,10 +123,11 @@ async function boot() {
   }
 
   rolloutPanel.load();
-  connectWebSocket(viewer, jogPanel, targetPanel, rolloutPanel);
+  calibrationPanel.load();
+  connectWebSocket(viewer, jogPanel, targetPanel, rolloutPanel, calibrationPanel);
 }
 
-function connectWebSocket(viewer, jogPanel, targetPanel, rolloutPanel) {
+function connectWebSocket(viewer, jogPanel, targetPanel, rolloutPanel, calibrationPanel) {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${location.host}/ws`);
   let gotMessage = false;
@@ -147,12 +150,16 @@ function connectWebSocket(viewer, jogPanel, targetPanel, rolloutPanel) {
     jogPanel.update(state.driver ? state : { ...state, driver: lastDriver });
     targetPanel.update(state.driver ? state : { ...state, driver: lastDriver });
     rolloutPanel.update(state.driver ? state : { ...state, driver: lastDriver });
+    calibrationPanel.update(state.driver ? state : { ...state, driver: lastDriver });
     if (state.driver) lastDriver = state.driver;
   };
 
   socket.onclose = () => {
     showBanner("connection to server lost — reconnecting…");
-    setTimeout(() => connectWebSocket(viewer, jogPanel, targetPanel, rolloutPanel), gotMessage ? 1000 : 3000);
+    setTimeout(
+      () => connectWebSocket(viewer, jogPanel, targetPanel, rolloutPanel, calibrationPanel),
+      gotMessage ? 1000 : 3000,
+    );
   };
 }
 

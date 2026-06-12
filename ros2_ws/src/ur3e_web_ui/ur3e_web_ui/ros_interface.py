@@ -80,7 +80,7 @@ class IKFailed(Exception):
 
 @dataclass
 class GoalRecord:
-    kind: str  # "jog" | "home" | "rollout" | "tcp"
+    kind: str  # "jog" | "home" | "rollout" | "tcp" | "calibration"
     phase: str  # "sending" | "active" | "succeeded" | "aborted" | "canceled" | "rejected"
     episode: int | None = None
     started_monotonic: float = 0.0

@@ -12,6 +12,8 @@ setup(
             "static/*.html",
             "static/css/*.css",
             "static/js/*.js",
+            "static/models/*.glb",
+            "static/models/*.json",
         ],
     },
     include_package_data=True,

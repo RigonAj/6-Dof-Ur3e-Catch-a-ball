@@ -40,6 +40,7 @@
         <button class="tab" data-tab="control">Control</button>
         <button class="tab" data-tab="target">Target</button>
         <button class="tab" data-tab="rollout">Rollout</button>
+        <button class="tab" data-tab="calibration">Calibration</button>
       </nav>
 
       <div class="tab-page active" id="tab-status">
@@ -204,6 +205,31 @@
           <div id="progress-label"></div>
         </div>
       </div>
+      <div class="tab-page" id="tab-calibration">
+        <h2>Calibration Poses</h2>
+        <p class="hint">Hand-eye calibration poses are stored in joint space and replayed
+        identically (no IK surprises). Jog or TCP-target the robot into position, tilt the
+        phone screen toward the camera (&plusmn;25&ndash;40&deg;, vary all three axes), then save.</p>
+        <div class="row gap">
+          <input id="calib-pose-name" type="text" placeholder="pose name (optional)">
+          <button id="btn-calib-save">Save current pose</button>
+        </div>
+        <table id="calib-pose-table">
+          <thead><tr><th>#</th><th>Name</th><th>Joints (deg)</th><th></th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="row gap">
+          <button id="btn-calib-next" disabled>Go to next pose&hellip;</button>
+        </div>
+        <div id="calib-status" class="goal-status">idle</div>
+        <div id="calib-path" class="hint"></div>
+        <h2>Phone Support Ghost</h2>
+        <label class="check-row">
+          <input type="checkbox" id="calib-show-support">
+          Show phone support on tool0
+        </label>
+        <div id="calib-support-status" class="hint"></div>
+      </div>
     </aside>
   </main>
 
@@ -222,6 +248,6 @@
     </div>
   </div>
 
-  <script type="module" src="/static/js/main.js?v=tcp-target-base-frame"></script>
+  <script type="module" src="/static/js/main.js?v=calibration-tab"></script>
 </body>
 </html>

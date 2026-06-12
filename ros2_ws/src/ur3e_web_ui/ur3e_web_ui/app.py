@@ -23,6 +23,7 @@ from ur3e_rollout_replay.replay_core import (
 )
 
 from . import motion
+from .calibration import DEFAULT_POSES_PATH, CalibrationPoseStore
 from .joint_limits import JointLimit, load_ur3e_joint_limits
 from .ros_interface import ActionServerUnavailable, IKFailed, IKServiceUnavailable, MotionBusy, RosBridge
 from .urdf_provider import UR_DESCRIPTION_SHARE
@@ -50,6 +51,7 @@ TCP_IK_SEEDED_TIMEOUT_S = 0.05
 TCP_IK_FALLBACK_TIMEOUT_S = 1.0
 TCP_IK_FALLBACK_ATTEMPTS = 3
 TCP_EXECUTE_MATCH_TOLERANCE_RAD = 0.05
+CALIBRATION_MOVE_MIN_DURATION_S = 4.0
 
 REPLAY_PRESETS = {
     "safe": SafetyLimits(
@@ -78,6 +80,7 @@ class Settings:
     rollout_path: str = str(DEFAULT_ROLLOUT_PATH)
     limits: SafetyLimits = SafetyLimits()
     home_positions: tuple[float, ...] = motion.HOME_POSITIONS
+    calibration_poses_path: str = str(DEFAULT_POSES_PATH)
 
 
 class JogRequest(BaseModel):
@@ -97,6 +100,10 @@ class ReplaySettingsRequest(BaseModel):
     min_segment_duration: float | None = None
 
 
+class CalibrationPoseRequest(BaseModel):
+    name: str | None = None
+
+
 class TcpTargetRequest(BaseModel):
     xyz_m: list[float]
     rpy_rad: list[float]
@@ -110,6 +117,7 @@ class TcpTargetRequest(BaseModel):
 
 def create_app(bridge: RosBridge, settings: Settings) -> FastAPI:
     joint_limits = load_ur3e_joint_limits()
+    calibration_store = CalibrationPoseStore(settings.calibration_poses_path)
     jog_lock = asyncio.Lock()
     limits_lock = Lock()
     current_replay_limits = settings.limits
@@ -419,6 +427,87 @@ def create_app(bridge: RosBridge, settings: Settings) -> FastAPI:
             "duration_s": plan.time_from_start_s[-1],
         }
 
+    # ------------------------------------------------------------------ calibration
+    # Hand-eye calibration poses (docs/ur3e_camera_base_calibration.md
+    # section 7): recorded joint configurations replayed identically, never
+    # Cartesian targets (IK branches + wrist singularity).
+
+    @app.get("/api/calibration/poses")
+    def calibration_poses() -> dict:
+        return {
+            "path": str(calibration_store.path),
+            "joint_names": list(calibration_store.joint_names),
+            "poses": calibration_store.list_poses(),
+        }
+
+    @app.post("/api/calibration/poses", status_code=201)
+    def calibration_save_pose(body: CalibrationPoseRequest) -> dict:
+        snapshot = bridge.get_snapshot()
+        if not snapshot.joint_states_alive:
+            raise HTTPException(status_code=503, detail="no live joint state to record")
+        try:
+            pose = calibration_store.add(snapshot.joint_positions, body.name)
+        except ReplayDataError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"pose": pose, "count": len(calibration_store.list_poses())}
+
+    @app.delete("/api/calibration/poses/{pose_index}")
+    def calibration_delete_pose(pose_index: int) -> dict:
+        try:
+            removed = calibration_store.delete(pose_index)
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"removed": removed, "count": len(calibration_store.list_poses())}
+
+    def _build_calibration_plan(pose_index: int, snapshot):
+        try:
+            pose = calibration_store.get(pose_index)
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        try:
+            plan = motion.build_joint_target_plan(
+                snapshot.joint_positions,
+                pose["joints_rad"],
+                get_replay_limits(),
+                min_duration=CALIBRATION_MOVE_MIN_DURATION_S,
+            )
+        except ReplayDataError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return plan, pose
+
+    @app.get("/api/calibration/poses/{pose_index}/plan")
+    def calibration_pose_plan(pose_index: int) -> dict:
+        snapshot = bridge.get_snapshot()
+        if not snapshot.joint_states_alive:
+            raise HTTPException(status_code=409, detail="no live joint state")
+        plan, pose = _build_calibration_plan(pose_index, snapshot)
+        return motion.plan_to_dict(
+            plan,
+            pose=pose,
+            pose_index=pose_index,
+            max_joint_delta_rad=motion.max_joint_delta(pose["joints_rad"], snapshot.joint_positions),
+        )
+
+    @app.post("/api/calibration/poses/{pose_index}/goto", status_code=202)
+    async def calibration_goto(pose_index: int, body: ConfirmRequest) -> dict:
+        if not body.confirm:
+            raise HTTPException(status_code=400, detail="confirm must be true")
+        snapshot = bridge.get_snapshot()
+        if not snapshot.joint_states_alive:
+            raise HTTPException(status_code=503, detail="no live joint state")
+        await ensure_motion_enabled(snapshot)
+        assert snapshot.joint_velocities is not None
+        if max(abs(v) for v in snapshot.joint_velocities) > STATIONARY_VELOCITY_RAD_S:
+            raise HTTPException(status_code=409, detail="robot is moving; wait for it to stop")
+        plan, pose = _build_calibration_plan(pose_index, snapshot)
+        record = await _send(plan, "calibration")
+        return {
+            "accepted": record.phase == "active",
+            "pose": pose,
+            "pose_index": pose_index,
+            "duration_s": plan.time_from_start_s[-1],
+        }
+
     @app.post("/api/cancel")
     async def cancel() -> dict:
         return {"canceled": await bridge.cancel_active()}
@@ -680,6 +769,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=",".join(str(v) for v in motion.HOME_POSITIONS),
         help="Comma-separated six-joint home pose in radians",
     )
+    parser.add_argument(
+        "--calibration-poses",
+        default=str(DEFAULT_POSES_PATH),
+        help="JSON file holding the recorded hand-eye calibration joint poses",
+    )
     return parser
 
 
@@ -700,6 +794,7 @@ def main(argv: list[str] | None = None) -> int:
             min_segment_duration=args.min_segment_duration,
         ),
         home_positions=home,
+        calibration_poses_path=args.calibration_poses,
     )
     app = create_app(RosBridge(), settings)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

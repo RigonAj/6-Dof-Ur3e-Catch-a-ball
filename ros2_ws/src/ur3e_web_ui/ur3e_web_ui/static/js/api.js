@@ -23,6 +23,7 @@ async function request(method, url, body) {
 export const api = {
   get: (url) => request("GET", url),
   post: (url, body = {}) => request("POST", url, body),
+  del: (url) => request("DELETE", url),
   async urdf() {
     const response = await fetch("/api/urdf");
     if (!response.ok) throw new Error(`URDF fetch failed: ${response.status}`);

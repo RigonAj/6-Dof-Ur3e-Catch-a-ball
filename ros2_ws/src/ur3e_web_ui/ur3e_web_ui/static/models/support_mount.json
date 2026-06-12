@@ -1,0 +1,7 @@
+{
+  "comment": "Pose of the Support3D.glb CAD origin in the tool0 frame (ROS axes, meters/radians). Tune visually against the real mount (docs/Smartphone_Sur_Support.jpeg); the metrology-grade T_tool0_mire is co-solved by the hand-eye calibration, this transform is display-only.",
+  "glb_url": "/static/models/Support3D.glb",
+  "xyz_m": [0.0, 0.0, 0.0],
+  "rpy_rad": [0.0, 0.0, 0.0],
+  "scale": 1.0
+}

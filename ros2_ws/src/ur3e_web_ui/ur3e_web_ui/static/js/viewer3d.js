@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import URDFLoader from "urdf-loader";
 
@@ -13,6 +14,7 @@ export class Viewer3D {
     this.container = container;
     this.robot = null;
     this.ghost = null;
+    this.toolMesh = null;
     this.ghostMaterialApplied = false;
     this.preview = null; // {plan, startMs, onProgress, onDone}
     this.targetFrame = null;
@@ -171,6 +173,42 @@ export class Viewer3D {
       const joint = this.robot.joints[names[i]];
       if (joint) joint.setJointValue(positions[i]);
     }
+  }
+
+  async loadToolMesh(config, linkName = "tool0") {
+    if (!this.robot) throw new Error("robot model not loaded yet");
+    const link = this.robot.links && this.robot.links[linkName];
+    if (!link) throw new Error(`${linkName} link not found in the URDF`);
+    if (this.toolMesh) {
+      this.toolMesh.removeFromParent();
+      this.toolMesh = null;
+    }
+    const gltf = await new GLTFLoader().loadAsync(config.glb_url);
+    const mesh = gltf.scene;
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xb07fff,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
+    mesh.traverse((child) => {
+      if (child.isMesh) child.material = material;
+    });
+    // Children of a URDF link live in ROS axes (the Y-up fix is applied at
+    // the robot root), so the mount transform is plain ROS xyz/rpy.
+    const scale = config.scale || 1.0;
+    mesh.scale.set(scale, scale, scale);
+    mesh.position.set(...(config.xyz_m || [0, 0, 0]));
+    const [roll, pitch, yaw] = config.rpy_rad || [0, 0, 0];
+    mesh.quaternion.setFromEuler(new THREE.Euler(roll, pitch, yaw, "ZYX"));
+    mesh.visible = false;
+    link.add(mesh);
+    this.toolMesh = mesh;
+    return mesh;
+  }
+
+  setToolMeshVisible(visible) {
+    if (this.toolMesh) this.toolMesh.visible = visible;
   }
 
   applyGhostMaterial() {
