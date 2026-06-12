@@ -9,6 +9,7 @@ export class CalibrationPanel {
     this.poses = [];
     this.nextIndex = 0; // cycling pointer for "Go to next pose"
     this.supportLoaded = false;
+    this.cameraResult = null;
 
     document.getElementById("btn-calib-save").addEventListener("click", () => this.saveCurrent());
     document.getElementById("btn-calib-next").addEventListener("click", () => this.gotoPose(this.nextIndex));
@@ -17,6 +18,9 @@ export class CalibrationPanel {
     });
     document.getElementById("calib-show-support").addEventListener("change", (event) => {
       this.toggleSupport(event.target.checked);
+    });
+    document.getElementById("calib-show-camera").addEventListener("change", (event) => {
+      this.toggleCamera(event.target.checked);
     });
   }
 
@@ -117,6 +121,27 @@ export class CalibrationPanel {
     } catch (error) {
       document.getElementById("calib-show-support").checked = false;
       status.textContent = `support load failed: ${error.message}`;
+    }
+  }
+
+  async toggleCamera(checked) {
+    const status = document.getElementById("calib-camera-status");
+    try {
+      if (checked && !this.cameraResult) {
+        this.cameraResult = await api.get("/api/calibration/camera");
+        const transform = this.cameraResult.T_base_camera;
+        this.viewer.setCameraFrame(transform);
+        const xyz = transform.xyz.map((value) => value.toFixed(3)).join(", ");
+        const samples = this.cameraResult.sample_count;
+        status.textContent =
+          `${transform.parent} -> ${transform.child}: [${xyz}] m` +
+          (samples ? ` (${samples} samples, ${this.cameraResult.path})` : ` (${this.cameraResult.path})`);
+      }
+      this.viewer.setCameraFrameVisible(checked);
+    } catch (error) {
+      document.getElementById("calib-show-camera").checked = false;
+      this.cameraResult = null;
+      status.textContent = `camera result: ${error.message}`;
     }
   }
 

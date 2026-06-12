@@ -15,6 +15,7 @@ export class Viewer3D {
     this.robot = null;
     this.ghost = null;
     this.toolMesh = null;
+    this.cameraFrame = null;
     this.ghostMaterialApplied = false;
     this.preview = null; // {plan, startMs, onProgress, onDone}
     this.targetFrame = null;
@@ -209,6 +210,62 @@ export class Viewer3D {
 
   setToolMeshVisible(visible) {
     if (this.toolMesh) this.toolMesh.visible = visible;
+  }
+
+  setCameraFrame(pose) {
+    // pose: {xyz: [m], quat_xyzw: [..]} of the optical frame in the UR
+    // `base` frame (the hand-eye result). Same base -> base_link -> three.js
+    // conversion as the TCP target frame.
+    if (!this.cameraFrame) this.buildCameraFrame();
+    const [x, y, z] = pose.xyz;
+    this.cameraFrame.position.set(-x, z, y);
+    const [qx, qy, qz, qw] = pose.quat_xyzw;
+    const baseQuat = new THREE.Quaternion(qx, qy, qz, qw);
+    const baseLinkQuat = BASE_TO_BASE_LINK_Q.clone().multiply(baseQuat);
+    this.cameraFrame.quaternion.copy(ROS_TO_THREE_Q.clone().multiply(baseLinkQuat));
+    this.cameraFrame.visible = true;
+  }
+
+  setCameraFrameVisible(visible) {
+    if (this.cameraFrame) this.cameraFrame.visible = visible;
+  }
+
+  buildCameraFrame() {
+    this.cameraFrame = new THREE.Group();
+    this.cameraFrame.visible = false;
+
+    const axes = [
+      { direction: new THREE.Vector3(1, 0, 0), color: 0xff4b4b },
+      { direction: new THREE.Vector3(0, 1, 0), color: 0x41c97f },
+      { direction: new THREE.Vector3(0, 0, 1), color: 0x4fa3ff },
+    ];
+    for (const axis of axes) {
+      this.cameraFrame.add(new THREE.ArrowHelper(axis.direction, new THREE.Vector3(), 0.15, axis.color, 0.04, 0.02));
+    }
+
+    // Wireframe frustum along +Z (the optical axis looks at the robot).
+    const depth = 0.18;
+    const halfWidth = 0.12;
+    const halfHeight = 0.09;
+    const corners = [
+      [-halfWidth, -halfHeight, depth],
+      [halfWidth, -halfHeight, depth],
+      [halfWidth, halfHeight, depth],
+      [-halfWidth, halfHeight, depth],
+    ];
+    const points = [];
+    for (let i = 0; i < 4; i++) {
+      points.push(new THREE.Vector3(0, 0, 0), new THREE.Vector3(...corners[i]));
+      points.push(new THREE.Vector3(...corners[i]), new THREE.Vector3(...corners[(i + 1) % 4]));
+    }
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const material = new THREE.LineBasicMaterial({ color: 0xf0d060, transparent: true, opacity: 0.8 });
+    this.cameraFrame.add(new THREE.LineSegments(geometry, material));
+
+    const label = this.makeAxisLabel("C", 0xf0d060);
+    label.position.set(0, 0.06, 0);
+    this.cameraFrame.add(label);
+    this.scene.add(this.cameraFrame);
   }
 
   applyGhostMaterial() {

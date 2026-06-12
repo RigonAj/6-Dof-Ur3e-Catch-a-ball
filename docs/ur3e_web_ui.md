@@ -141,6 +141,9 @@ The backend also exposes a JSON API (interactive docs at `/docs`):
 - `POST /api/tcp_target/plan`, `POST /api/tcp_target/execute`
 - `GET/POST /api/calibration/poses`, `DELETE /api/calibration/poses/{i}`,
   `GET /api/calibration/poses/{i}/plan`, `POST /api/calibration/poses/{i}/goto`
+- `GET /api/calibration/camera` — hand-eye result (`--camera-calibration`,
+  default `calibration/handeye_result.yaml`); the Calibration tab can draw the
+  calibrated camera frame in the viewer from it
 - `GET /api/rollout`, `GET /api/rollout/{i}/plan?approach=true`
 - `POST /api/jog {"joint": "...", "direction": 1, "step_rad": 0.05}`
 - `POST /api/move_home {"confirm": true}`, `POST /api/cancel`
