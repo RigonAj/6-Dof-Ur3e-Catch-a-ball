@@ -1,8 +1,8 @@
 import { api } from "./api.js";
-import { Viewer3D } from "./viewer3d.js?v=camera-frame";
+import { Viewer3D } from "./viewer3d.js?v=dual-replay-preview";
 import { JogPanel } from "./jog_panel.js";
 import { TargetPanel } from "./target_panel.js?v=tcp-target-base-frame";
-import { RolloutPanel } from "./rollout_panel.js";
+import { RolloutPanel } from "./rollout_panel.js?v=dual-replay-preview";
 import { CalibrationPanel } from "./calibration_panel.js";
 
 const RAD_TO_DEG = 180 / Math.PI;

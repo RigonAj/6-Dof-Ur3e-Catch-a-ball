@@ -204,7 +204,9 @@ Provides replay of Isaac Lab rollouts:
   - min segment duration
   - Safe / Balanced / Fast presets
 - Validates a replay plan.
-- Previews it with a ghost robot.
+- Previews it with a blue ghost robot for the real-robot plan and, when the
+  plan includes the live approach, an amber ghost for the recorded replay
+  without the approach.
 - Executes after confirmation.
 
 Replay execution always recomputes from the current physical robot joint state, so an approach segment is prepended from the current robot pose to the first recorded replay target.
@@ -582,4 +584,3 @@ For physical motion testing:
 2. Use the UI ghost preview.
 3. Keep speed low.
 4. Move only a few centimeters when validating frame directions.
-

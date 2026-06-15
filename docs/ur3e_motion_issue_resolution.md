@@ -176,6 +176,8 @@ The UI now exposes replay timing controls in the Rollout tab:
 - Segment min
 - Safe / Balanced / Fast presets
 - Include live approach when validating/previews
+- Dual replay preview: blue shows the approach-prefixed plan estimated for the
+  real robot, amber shows the recorded replay without the live approach.
 
 The teach-pendant speed slider and UR controller limits still apply on top of these replay settings.
 
@@ -372,4 +374,3 @@ Action server ready
 program running + speed > 0%
   -> Real motion should be possible if the trajectory is valid and safe.
 ```
-

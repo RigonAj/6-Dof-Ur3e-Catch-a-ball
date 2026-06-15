@@ -14,10 +14,12 @@ export class Viewer3D {
     this.container = container;
     this.robot = null;
     this.ghost = null;
+    this.replayGhost = null;
     this.toolMesh = null;
     this.cameraFrame = null;
     this.ghostMaterialApplied = false;
-    this.preview = null; // {plan, startMs, onProgress, onDone}
+    this.replayGhostMaterialApplied = false;
+    this.preview = null; // {plan, referencePlan, startMs, onProgress, onDone}
     this.targetFrame = null;
     this.targetCallback = null;
     this.targetUpdateMuted = false;
@@ -70,6 +72,11 @@ export class Viewer3D {
     this.ghost.rotation.x = -Math.PI / 2;
     this.ghost.visible = false;
     this.scene.add(this.ghost);
+
+    this.replayGhost = loader.parse(urdfText);
+    this.replayGhost.rotation.x = -Math.PI / 2;
+    this.replayGhost.visible = false;
+    this.scene.add(this.replayGhost);
   }
 
   buildTargetFrame() {
@@ -186,14 +193,20 @@ export class Viewer3D {
     }
     const gltf = await new GLTFLoader().loadAsync(config.glb_url);
     const mesh = gltf.scene;
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xb07fff,
-      transparent: true,
-      opacity: 0.55,
-      depthWrite: false,
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xdce7ee,
+      transparent: false,
+      opacity: 1.0,
+      depthWrite: true,
+      side: THREE.DoubleSide,
+      toneMapped: false,
     });
     mesh.traverse((child) => {
-      if (child.isMesh) child.material = material;
+      if (child.isMesh) {
+        child.material = material;
+        child.castShadow = false;
+        child.receiveShadow = false;
+      }
     });
     // Children of a URDF link live in ROS axes (the Y-up fix is applied at
     // the robot root), so the mount transform is plain ROS xyz/rpy.
@@ -268,42 +281,50 @@ export class Viewer3D {
     this.scene.add(this.cameraFrame);
   }
 
-  applyGhostMaterial() {
-    if (!this.ghost || this.ghostMaterialApplied) return;
+  applyGhostMaterial(kind = "primary") {
+    const ghost = kind === "reference" ? this.replayGhost : this.ghost;
+    const flagName = kind === "reference" ? "replayGhostMaterialApplied" : "ghostMaterialApplied";
+    if (!ghost || this[flagName]) return;
     const material = new THREE.MeshStandardMaterial({
-      color: 0x4fa3ff,
+      color: kind === "reference" ? 0xe0a93e : 0x4fa3ff,
       transparent: true,
-      opacity: 0.35,
+      opacity: kind === "reference" ? 0.3 : 0.35,
       depthWrite: false,
     });
     let meshCount = 0;
-    this.ghost.traverse((child) => {
+    ghost.traverse((child) => {
       if (child.isMesh) {
         child.material = material;
         meshCount += 1;
       }
     });
     // Meshes load asynchronously; only latch once they exist.
-    if (meshCount > 0) this.ghostMaterialApplied = true;
+    if (meshCount > 0) this[flagName] = true;
   }
 
-  playPreview(plan, { onProgress, onDone } = {}) {
+  playPreview(plan, { referencePlan = null, onProgress, onDone } = {}) {
     if (!this.ghost) return;
-    this.applyGhostMaterial();
+    this.applyGhostMaterial("primary");
     this.ghost.visible = true;
-    this.preview = { plan, startMs: performance.now(), onProgress, onDone };
+    if (this.replayGhost) {
+      this.applyGhostMaterial("reference");
+      this.replayGhost.visible = !!referencePlan;
+    }
+    this.preview = { plan, referencePlan, startMs: performance.now(), onProgress, onDone };
   }
 
   showGhostPlanEnd(plan) {
     if (!this.ghost || !plan || !plan.positions || plan.positions.length === 0) return;
-    this.applyGhostMaterial();
+    this.applyGhostMaterial("primary");
     this.ghost.visible = true;
+    if (this.replayGhost) this.replayGhost.visible = false;
     this.preview = null;
-    this.setGhostJoints(plan.joint_names, plan.positions[plan.positions.length - 1]);
+    this.setGhostJoints(plan.joint_names, plan.positions[plan.positions.length - 1], this.ghost);
   }
 
   stopPreview() {
     if (this.ghost) this.ghost.visible = false;
+    if (this.replayGhost) this.replayGhost.visible = false;
     const preview = this.preview;
     this.preview = null;
     if (preview && preview.onDone) preview.onDone();
@@ -311,15 +332,35 @@ export class Viewer3D {
 
   tickPreview() {
     if (!this.preview) return;
-    const { plan, startMs, onProgress } = this.preview;
-    const times = plan.time_from_start_s;
-    const total = times[times.length - 1];
+    const { plan, referencePlan, startMs, onProgress } = this.preview;
+    const total = plan.time_from_start_s[plan.time_from_start_s.length - 1];
     const t = (performance.now() - startMs) / 1000;
 
     if (t >= total) {
-      this.setGhostJoints(plan.joint_names, plan.positions[plan.positions.length - 1]);
+      this.setGhostJoints(plan.joint_names, plan.positions[plan.positions.length - 1], this.ghost);
+      if (referencePlan && this.replayGhost) {
+        this.setGhostJoints(
+          referencePlan.joint_names,
+          referencePlan.positions[referencePlan.positions.length - 1],
+          this.replayGhost,
+        );
+      }
       if (onProgress) onProgress(1);
       this.stopPreview();
+      return;
+    }
+
+    this.setGhostJointsAtTime(this.ghost, plan, t);
+    if (referencePlan && this.replayGhost) this.setGhostJointsAtTime(this.replayGhost, referencePlan, t);
+    if (onProgress) onProgress(t / total);
+  }
+
+  setGhostJointsAtTime(ghost, plan, t) {
+    const times = plan.time_from_start_s;
+    if (!ghost || !times || times.length === 0 || !plan.positions || plan.positions.length === 0) return;
+    const total = times[times.length - 1];
+    if (t >= total || plan.positions.length === 1) {
+      this.setGhostJoints(plan.joint_names, plan.positions[plan.positions.length - 1], ghost);
       return;
     }
 
@@ -332,13 +373,13 @@ export class Viewer3D {
     const a = plan.positions[segment];
     const b = plan.positions[segment + 1];
     const interpolated = a.map((value, i) => value + (b[i] - value) * alpha);
-    this.setGhostJoints(plan.joint_names, interpolated);
-    if (onProgress) onProgress(t / total);
+    this.setGhostJoints(plan.joint_names, interpolated, ghost);
   }
 
-  setGhostJoints(names, positions) {
+  setGhostJoints(names, positions, ghost = this.ghost) {
+    if (!ghost) return;
     for (let i = 0; i < names.length; i++) {
-      const joint = this.ghost.joints[names[i]];
+      const joint = ghost.joints[names[i]];
       if (joint) joint.setJointValue(positions[i]);
     }
   }

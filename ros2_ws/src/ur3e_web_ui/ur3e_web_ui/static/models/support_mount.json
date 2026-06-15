@@ -1,7 +1,7 @@
 {
-  "comment": "Pose of the Support3D.glb CAD origin in the tool0 frame (ROS axes, meters/radians). Tune visually against the real mount (docs/Smartphone_Sur_Support.jpeg); the metrology-grade T_tool0_mire is co-solved by the hand-eye calibration, this transform is display-only.",
+  "comment": "Display-only pose of the Support3D.glb CAD origin in tool0 (ROS axes, meters/radians). The CAD origin is the phone/screen center; the robot-side face is about +0.1595 m on CAD X, with CAD +X pointing back to the flange. In the URDF tool0 used by the viewer, the real support exits along -Z. The metrology-grade T_tool0_mire is co-solved by hand-eye calibration.",
   "glb_url": "/static/models/Support3D.glb",
-  "xyz_m": [0.0, 0.0, 0.0],
-  "rpy_rad": [0.0, 0.0, 0.0],
+  "xyz_m": [0.0, -0.0079, -0.1595],
+  "rpy_rad": [0.0, -1.5707963268, 0.0],
   "scale": 1.0
 }

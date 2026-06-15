@@ -17,6 +17,7 @@ export class RolloutPanel {
     this.driverAlive = false;
     this.programRunning = null;
     this.lastGoalPhase = null;
+    this.previewRequestId = 0;
 
     document.getElementById("btn-settings-apply").addEventListener("click", () => this.applySettingsFromInputs());
     document.getElementById("setting-preview-approach").addEventListener("change", () => this.revalidateSelected());
@@ -25,6 +26,7 @@ export class RolloutPanel {
     }
     document.getElementById("btn-preview").addEventListener("click", () => this.preview());
     document.getElementById("btn-preview-stop").addEventListener("click", () => {
+      this.previewRequestId += 1;
       this.viewer.stopPreview();
       this.togglePreviewButtons(false);
     });
@@ -191,13 +193,27 @@ export class RolloutPanel {
     document.getElementById("btn-execute").disabled = !plan.within_limits;
   }
 
-  preview() {
+  async preview() {
     if (!this.currentPlan) return;
+    const requestId = this.previewRequestId + 1;
+    this.previewRequestId = requestId;
     this.togglePreviewButtons(true);
+    let referencePlan = null;
+    if (this.currentPlan.approach_included && this.selectedEpisode !== null) {
+      try {
+        referencePlan = await api.get(`/api/rollout/${this.selectedEpisode}/plan?approach=false`);
+      } catch (error) {
+        this.onError(`recorded replay preview: ${error.message}`);
+      }
+    }
+    if (requestId !== this.previewRequestId) return;
     const fill = document.getElementById("progress-fill");
     document.getElementById("exec-progress").classList.remove("hidden");
-    document.getElementById("progress-label").textContent = "preview (ghost only — robot does not move)";
+    document.getElementById("progress-label").textContent = referencePlan
+      ? "preview: blue = real robot plan, amber = recorded replay"
+      : "preview (ghost only — robot does not move)";
     this.viewer.playPreview(this.currentPlan, {
+      referencePlan,
       onProgress: (fraction) => { fill.style.width = `${(fraction * 100).toFixed(1)}%`; },
       onDone: () => {
         this.togglePreviewButtons(false);
