@@ -19,7 +19,7 @@ for a direct RL task:
 The registered Gym task is:
 
 ```bash
-Template-Firsttraining-Direct-v0
+Ball-Catch-UR3-Direct-v0
 ```
 
 ## Project Layout
@@ -31,9 +31,9 @@ Template-Firsttraining-Direct-v0
 |-- scripts/skrl/                # SKRL train and play scripts
 |-- source/FirstTraining/
 |   |-- setup.py                 # Python package metadata
-|   `-- FirstTraining/tasks/direct/firsttraining/
-|       |-- firsttraining_env.py
-|       |-- firsttraining_env_cfg.py
+|   `-- FirstTraining/tasks/direct/ball_catch_ur3/
+|       |-- ball_catch_env.py
+|       |-- ball_catch_env_cfg.py
 |       |-- ur_gripper.py
 |       `-- agents/skrl_ppo_cfg.yaml
 `-- script.zsh                   # Convenience aliases
@@ -76,8 +76,8 @@ You can train directly with:
 
 ```bash
 HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/train.py \
-  --task Template-Firsttraining-Direct-v0 \
-  --num_envs=12000 \
+  --task Ball-Catch-UR3-Direct-v0 \
+  --num_envs=512 \
   --headless \
   --livestream 0 \
   --rendering_mode performance
@@ -93,7 +93,7 @@ train
 Training logs and checkpoints are written under:
 
 ```text
-logs/skrl/cartpole_direct/
+logs/skrl/BallCatchUR3/
 ```
 
 The directory name is inherited from the original template config.
@@ -125,7 +125,7 @@ The play script supports a headless success-rate evaluation mode:
 
 ```bash
 HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/play.py \
-  --task Template-Firsttraining-Direct-v0 \
+  --task Ball-Catch-UR3-Direct-v0 \
   --num_envs=512 \
   --checkpoint <path-to-best_agent.pt> \
   --headless \
@@ -149,7 +149,7 @@ To export the trained SKRL checkpoint as a deterministic inference policy and sa
 
 ```bash
 HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/play.py \
-  --task Template-Firsttraining-Direct-v0 \
+  --task Ball-Catch-UR3-Direct-v0 \
   --num_envs=1 \
   --checkpoint logs/skrl/cartpole_direct/2026-05-26_17-13-29_ppo_torch/checkpoints/best_agent.pt \
   --headless \
@@ -169,7 +169,7 @@ To simulate 10 completed episodes and save every policy action:
 
 ```bash
 HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/play.py \
-  --task Template-Firsttraining-Direct-v0 \
+  --task Ball-Catch-UR3-Direct-v0 \
   --num_envs=1 \
   --checkpoint logs/skrl/cartpole_direct/2026-05-26_17-13-29_ppo_torch/checkpoints/best_agent.pt \
   --headless \
@@ -199,7 +199,7 @@ For the recommended real-robot replay workflow using the Universal Robots ROS 2 
 Most task parameters are in:
 
 ```text
-source/FirstTraining/FirstTraining/tasks/direct/firsttraining/firsttraining_env_cfg.py
+source/FirstTraining/FirstTraining/tasks/direct/ball_catch_ur3/ball_catch_env_cfg.py
 ```
 
 Useful flags and ranges:
@@ -214,7 +214,7 @@ Useful flags and ranges:
 PPO hyperparameters are in:
 
 ```text
-source/FirstTraining/FirstTraining/tasks/direct/firsttraining/agents/skrl_ppo_cfg.yaml
+source/FirstTraining/FirstTraining/tasks/direct/ball_catch_ur3/agents/skrl_ppo_cfg.yaml
 ```
 
 ## Notes
