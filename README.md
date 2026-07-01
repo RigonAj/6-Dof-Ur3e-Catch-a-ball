@@ -105,12 +105,29 @@ noise enabled at `ball_position_noise_std = 0.05`, i.e. a 5 cm Gaussian standard
 
 ## Play
 
-To run the latest checkpoint found by `script.zsh`:
+To run the newest checkpoint found by `script.zsh` without typing the run name:
 
 ```bash
 source script.zsh
 play
 ```
+
+`play` resolves the most recently modified checkpoint under `logs/skrl/cartpole_direct/`, looking at
+both `best_agent.pt` and `agent_*.pt`. Useful variants:
+
+```bash
+checkpoint          # print the checkpoint that play will use
+checkpoint best     # print the newest best_agent.pt, falling back to latest if none exists
+play latest         # same as play
+play best           # force the newest best_agent.pt
+play_latest         # alias-style helper for latest
+play_best           # alias-style helper for best
+```
+
+Interactive `play` opens an Isaac Sim dashboard with pause, one-step advance, simulation speed,
+current action values, reward, ball/disk position and joint target error for environment 0. It defaults to
+one environment for readability. Use `play --num_envs=32` for multi-env visual stress tests,
+`play --disable_play_ui` to hide the dashboard, or `play --sim_speed=0.5` to start slower.
 
 To record a short video:
 
@@ -180,19 +197,24 @@ HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/play.py \
 ```
 
 The rollout JSON contains one list per completed episode. Each sample includes the 33-D observation,
-the 6-D normalized policy action, and the scaled UR3e joint position target:
+the 6-D normalized policy action, the UR3e joint position target actually sent to Isaac Lab, and the
+post-physics simulator state used for sim-to-real comparison.
 
 ```text
-joint_position_target_rad = action_normalized * action_scale
+joint_position_target_rad = previous_joint_position_target_rad + bounded_delta_q
 ```
 
-For this task, `action_scale = 0.5`, `joint_names` are ordered as the UR3e arm joints in the
-environment config, and the policy step interval is written as `dt_s` in the JSON metadata. Treat these
-recorded targets as simulation commands; validate limits, timing, collision behavior, and an emergency
-stop path before sending any replay to a real UR3e.
+For the current task, `bounded_delta_q` is produced by clipping `action_normalized` to `[-1, 1]`,
+scaling by `joint_velocity_safe_rad_s * dt_s`, then applying acceleration and joint-limit clamps. The
+`joint_names`, `dt_s`, limits and action semantics are written to `policy_metadata.json` and copied into
+the rollout metadata. Treat recorded targets as simulation commands; validate limits, timing, collision
+behavior, and an emergency-stop path before sending any replay to a real UR3e.
 
-For the recommended real-robot replay workflow using the Universal Robots ROS 2 driver, see
-[UR3e Real-Robot Replay Guide](docs/ur3e_real_robot_replay.md).
+For the recommended V1 sim-to-real workflow, including export validation and rollout safety checks, see
+[Sim2real V1 Workflow](docs/sim2real_v1.md). For the real-robot replay workflow using the Universal
+Robots ROS 2 driver, see [UR3e Real-Robot Replay Guide](docs/ur3e_real_robot_replay.md).
+That guide also covers comparing the simulator's post-action joint positions against measured real
+UR3e joint states after replaying the same episode.
 
 ## Useful Configuration
 
@@ -208,6 +230,11 @@ Useful flags and ranges:
 - `enable_ball_position_noise`: enable Gaussian noise on ball spawn position.
 - `ball_position_noise_std`: Gaussian noise standard deviation in meters.
 - `disk_radius`: trigger radius in meters. Set `<= 0` to infer it from the Disk mesh.
+- `joint_velocity_safe_rad_s`: per-joint velocity envelope used to convert normalized actions into
+  per-step joint deltas.
+- `joint_acceleration_safe_rad_s2`: per-joint acceleration envelope applied before commanding targets.
+- `UR3E_EFFORT_LIMITS_NM` in `ur_gripper.py`: effort limits aligned with `ur_description`
+  `[56, 56, 28, 12, 12, 12]` Nm.
 - `enable_disk_center_marker`: show a red marker at the disk center.
 - `reset_on_success`: reset the episode immediately after a successful pass-through.
 

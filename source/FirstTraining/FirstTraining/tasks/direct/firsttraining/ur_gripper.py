@@ -7,6 +7,34 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 
+UR3E_ARM_JOINTS = [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+]
+
+UR3E_EFFORT_LIMITS_NM = {
+    "shoulder_pan_joint": 56.0,
+    "shoulder_lift_joint": 56.0,
+    "elbow_joint": 28.0,
+    "wrist_1_joint": 12.0,
+    "wrist_2_joint": 12.0,
+    "wrist_3_joint": 12.0,
+}
+
+UR3E_NOMINAL_VELOCITY_LIMITS_RAD_S = {
+    "shoulder_pan_joint": 3.1416,
+    "shoulder_lift_joint": 3.1416,
+    "elbow_joint": 3.1416,
+    "wrist_1_joint": 6.2832,
+    "wrist_2_joint": 6.2832,
+    "wrist_3_joint": 6.2832,
+}
+
+
 def _find_usd_asset(filename: str) -> str:
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "USD_File" / filename
@@ -43,15 +71,9 @@ UR3E_HOOP_CFG = ArticulationCfg(
     ),
     actuators={
         "arm": ImplicitActuatorCfg(
-            joint_names_expr=[
-                "shoulder_pan_joint",
-                "shoulder_lift_joint",
-                "elbow_joint",
-                "wrist_1_joint",
-                "wrist_2_joint",
-                "wrist_3_joint",
-            ],
-            effort_limit_sim=23.0,
+            joint_names_expr=UR3E_ARM_JOINTS,
+            effort_limit_sim=UR3E_EFFORT_LIMITS_NM,
+            velocity_limit_sim=UR3E_NOMINAL_VELOCITY_LIMITS_RAD_S,
             stiffness=800.0,
             damping=40.0,
         ),

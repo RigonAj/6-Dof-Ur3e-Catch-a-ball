@@ -36,6 +36,42 @@ class FirsttrainingEnv(DirectRLEnv):
         self._zero_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.actions = torch.zeros(self.num_envs, len(self.cfg.joint_names), device=self.device)
         self.joint_pos_target = torch.zeros_like(self.actions)
+        self._action_penalty_coeff = torch.zeros(len(self.cfg.joint_names), device=self.device)
+        self._joint_action_penalty_coeff_ranges = torch.tensor(
+            self.cfg.joint_action_penalty_coeff_ranges,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        if self._joint_action_penalty_coeff_ranges.shape != (len(self.cfg.joint_names), 2):
+            raise ValueError(
+                "joint_action_penalty_coeff_ranges must contain one (start, end) pair per joint in cfg.joint_names."
+            )
+        self._robot_pose_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._ball_respawn_pending = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._ball_respawn_delay_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._reference_joint_pos_target = torch.zeros_like(self.actions)
+        self._previous_joint_cmd_vel = torch.zeros_like(self.actions)
+        self._step_dt = float(self.cfg.sim.dt * self.cfg.decimation)
+        self._joint_velocity_safe = torch.tensor(
+            self.cfg.joint_velocity_safe_rad_s,
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
+        self._joint_acceleration_safe = torch.tensor(
+            self.cfg.joint_acceleration_safe_rad_s2,
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
+        self._joint_position_lower = torch.tensor(
+            self.cfg.joint_position_lower_rad,
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
+        self._joint_position_upper = torch.tensor(
+            self.cfg.joint_position_upper_rad,
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
         self._prev_d = torch.zeros(self.num_envs, device=self.device)
         self._identity_quat_wxyz = torch.tensor((1.0, 0.0, 0.0, 0.0), device=self.device)
 
@@ -50,6 +86,17 @@ class FirsttrainingEnv(DirectRLEnv):
         self._distance = torch.zeros(self.num_envs, 1, device=self.device)
         self._delta_d = torch.zeros(self.num_envs, device=self.device)
         self._local_pose_cache_valid = False
+
+        # State after the last physics step and before Isaac Lab auto-resets done environments.
+        self._last_step_joint_pos = torch.zeros(self.num_envs, len(self.cfg.joint_names), device=self.device)
+        self._last_step_joint_vel = torch.zeros_like(self._last_step_joint_pos)
+        self._last_step_joint_pos_target = torch.zeros_like(self._last_step_joint_pos)
+        self._last_step_disk_pos_w = torch.zeros_like(self._disk_pos_w)
+        self._last_step_disk_pos_local = torch.zeros_like(self._disk_pos_local)
+        self._last_step_ball_pos_w = torch.zeros_like(self._ball_pos_w)
+        self._last_step_ball_pos_local = torch.zeros_like(self._ball_pos_local)
+        self._last_step_ball_vel_w = torch.zeros_like(self._ball_vel_w)
+        self._last_step_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         disk_offset_b, disk_normal_b, disk_radius = self._read_disk_pose_in_body_frame()
         self._disk_offset_b = torch.tensor(disk_offset_b, dtype=torch.float32, device=self.device).repeat(
@@ -147,6 +194,17 @@ class FirsttrainingEnv(DirectRLEnv):
         torch.linalg.vector_norm(self._direction, dim=-1, keepdim=True, out=self._distance)
         self._local_pose_cache_valid = True
 
+    def _cache_last_step_state(self) -> None:
+        self._last_step_joint_pos.copy_(self.robot.data.joint_pos[:, self._arm_dof_idx])
+        self._last_step_joint_vel.copy_(self.robot.data.joint_vel[:, self._arm_dof_idx])
+        self._last_step_joint_pos_target.copy_(self.joint_pos_target)
+        self._last_step_disk_pos_w.copy_(self._disk_pos_w)
+        self._last_step_disk_pos_local.copy_(self._disk_pos_w).sub_(self.scene.env_origins)
+        self._last_step_ball_pos_w.copy_(self._ball_pos_w)
+        self._last_step_ball_pos_local.copy_(self._ball_pos_w).sub_(self.scene.env_origins)
+        self._last_step_ball_vel_w.copy_(self._ball_vel_w)
+        self._last_step_valid[:] = True
+
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.ball = RigidObject(self.cfg.ball_cfg)
@@ -178,8 +236,43 @@ class FirsttrainingEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        self.actions.copy_(actions)
-        torch.mul(actions, self.cfg.action_scale, out=self.joint_pos_target)
+        self._update_ball_respawn_delays()
+        self.actions.copy_(torch.clamp(actions, -1.0, 1.0))
+
+        reference_q = self._reference_joint_pos_target.copy_(self.joint_pos_target)
+        max_delta_q = self._joint_velocity_safe * self._step_dt
+        desired_delta_q = torch.clamp(self.actions * max_delta_q, -max_delta_q, max_delta_q)
+        desired_cmd_vel = desired_delta_q / self._step_dt
+        distance_to_lower = torch.clamp(reference_q - self._joint_position_lower, min=0.0)
+        distance_to_upper = torch.clamp(self._joint_position_upper - reference_q, min=0.0)
+        accel_step = self._joint_acceleration_safe * self._step_dt
+        max_negative_stop_vel = torch.clamp(
+            -accel_step + torch.sqrt(accel_step**2 + 2.0 * self._joint_acceleration_safe * distance_to_lower),
+            min=0.0,
+        )
+        max_positive_stop_vel = torch.clamp(
+            -accel_step + torch.sqrt(accel_step**2 + 2.0 * self._joint_acceleration_safe * distance_to_upper),
+            min=0.0,
+        )
+        desired_cmd_vel = torch.clamp(desired_cmd_vel, -max_negative_stop_vel, max_positive_stop_vel)
+
+        max_delta_v = accel_step
+        cmd_vel_delta = torch.clamp(
+            desired_cmd_vel - self._previous_joint_cmd_vel,
+            -max_delta_v,
+            max_delta_v,
+        )
+        cmd_vel = torch.clamp(
+            self._previous_joint_cmd_vel + cmd_vel_delta,
+            -self._joint_velocity_safe,
+            self._joint_velocity_safe,
+        )
+
+        self.joint_pos_target.copy_(reference_q + cmd_vel * self._step_dt)
+        self.joint_pos_target.copy_(
+            torch.clamp(self.joint_pos_target, self._joint_position_lower, self._joint_position_upper)
+        )
+        self._previous_joint_cmd_vel.copy_((self.joint_pos_target - reference_q) / self._step_dt)
 
     def _apply_action(self) -> None:
         self.robot.set_joint_position_target(
@@ -217,16 +310,39 @@ class FirsttrainingEnv(DirectRLEnv):
         self._delta_d.copy_(self._prev_d).sub_(self._distance[:, 0])
         self._prev_d.copy_(self._distance[:, 0])
 
+        action_penalty_coeff = self._get_action_penalty_coeff()
         return compute_rewards(
             self._distance[:, 0],
             self.actions,
             self.reset_terminated,
             self._passed_this_step,
             self._delta_d,
+            action_penalty_coeff,
         )
+
+    def _get_action_penalty_coeff(self) -> torch.Tensor:
+        warmup_steps = int(self.cfg.action_penalty_warmup_steps)
+        if warmup_steps <= 0:
+            smooth_progress = 1.0
+        else:
+            raw_progress = float(getattr(self, "common_step_counter", 0)) / float(warmup_steps)
+            progress = min(max(raw_progress, 0.0), 1.0)
+            smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+
+        if self.cfg.use_per_joint_action_penalty:
+            coeff_start = self._joint_action_penalty_coeff_ranges[:, 0]
+            coeff_end = self._joint_action_penalty_coeff_ranges[:, 1]
+            self._action_penalty_coeff.copy_(coeff_start + (coeff_end - coeff_start) * smooth_progress)
+        else:
+            coeff_start, coeff_end = self.cfg.action_penalty_coeff_range
+            coeff = float(coeff_start) + (float(coeff_end) - float(coeff_start)) * smooth_progress
+            self._action_penalty_coeff.fill_(coeff)
+
+        return self._action_penalty_coeff
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         self._update_cached_poses()
+        self._cache_last_step_state()
 
         forces_arm = self.contact_sensor_arm.data.net_forces_w
         torch.linalg.vector_norm(forces_arm, dim=-1, out=self._contact_force_norm)
@@ -240,6 +356,7 @@ class FirsttrainingEnv(DirectRLEnv):
             self._prev_disk_signed_dist,
             self._disk_radius,
         )
+        passed &= ~self._ball_respawn_pending
         self._passed_this_step.copy_(passed)
         self._prev_disk_signed_dist.copy_(signed_dist)
         self.pass_through_count += passed.float()
@@ -247,7 +364,7 @@ class FirsttrainingEnv(DirectRLEnv):
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        ball_on_ground = self._ball_pos_w[:, 2] < 0.05
+        ball_on_ground = (self._ball_pos_w[:, 2] < 0.05) & ~self._ball_respawn_pending
         is_caught = self.pass_through_count > 0.0
         hit_arm = self._contact_on_arm
         success_done = is_caught if self.cfg.reset_on_success else self._zero_done
@@ -257,14 +374,33 @@ class FirsttrainingEnv(DirectRLEnv):
         self._last_done_success[done] = self.episode_success[done]
         self.extras["success"] = self._last_done_success
 
+        continuing_success = passed & ~done
+        if self.cfg.reset_ball_on_success and not self.cfg.reset_on_success and continuing_success.any():
+            self._queue_ball_respawn_idx(continuing_success.nonzero(as_tuple=False).squeeze(-1))
+
         return terminated, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         super()._reset_idx(env_ids)
 
-        # Reset robot joints
+        if self.cfg.reset_robot_on_episode_reset:
+            self._reset_robot_idx(env_ids)
+            self._robot_pose_initialized[env_ids] = True
+        else:
+            already_initialized = self._robot_pose_initialized[env_ids]
+            initial_env_ids = env_ids[~already_initialized]
+            if len(initial_env_ids) > 0:
+                self._reset_robot_idx(initial_env_ids)
+                self._robot_pose_initialized[initial_env_ids] = True
+            if already_initialized.any():
+                self._sync_robot_targets_to_current_pose(env_ids[already_initialized])
+
+        self._reset_ball_idx(env_ids, reset_episode_tracking=True)
+
+    def _reset_robot_idx(self, env_ids: Sequence[int]) -> None:
         joint_pos = torch.zeros((len(env_ids), len(self._arm_dof_idx)), device=self.device)
         joint_pos[:, 0] = sample_uniform(-0.785, 0.785, len(env_ids), self.device)
         joint_pos[:, 1] = -1.57 + sample_uniform(-0.9, 0.2, len(env_ids), self.device)
@@ -276,10 +412,97 @@ class FirsttrainingEnv(DirectRLEnv):
 
         self.actions[env_ids] = 0.0
         self.joint_pos_target[env_ids] = joint_pos
+        self._previous_joint_cmd_vel[env_ids] = 0.0
         self.robot.set_joint_position_target(joint_pos, env_ids=env_ids, joint_ids=self._arm_dof_idx)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, joint_ids=self._arm_dof_idx, env_ids=env_ids)
 
+    def _sync_robot_targets_to_current_pose(self, env_ids: Sequence[int]) -> None:
+        joint_pos = self.robot.data.joint_pos[env_ids][:, self._arm_dof_idx].clone()
+        self.actions[env_ids] = 0.0
+        self.joint_pos_target[env_ids] = joint_pos
+        self._previous_joint_cmd_vel[env_ids] = 0.0
+        self.robot.set_joint_position_target(joint_pos, env_ids=env_ids, joint_ids=self._arm_dof_idx)
+
+    def _maybe_random_reset_robot_on_ball_reset(self, env_ids: Sequence[int]) -> None:
+        if self.cfg.reset_robot_on_episode_reset or not self.cfg.random_robot_reset_on_ball_reset:
+            return
+
+        reset_probability = min(max(float(self.cfg.random_robot_reset_on_ball_reset_probability), 0.0), 1.0)
+        if reset_probability <= 0.0:
+            return
+
+        reset_mask = torch.rand(len(env_ids), device=self.device) < reset_probability
+        if reset_mask.any():
+            reset_env_ids = env_ids[reset_mask]
+            self._reset_robot_idx(reset_env_ids)
+            self._robot_pose_initialized[reset_env_ids] = True
+
+    def _queue_ball_respawn_idx(self, env_ids: Sequence[int]) -> None:
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        delay_steps = self._sample_ball_respawn_delay_steps(env_ids)
+        immediate_mask = delay_steps <= 0
+        if immediate_mask.any():
+            self._reset_ball_idx(env_ids[immediate_mask], reset_episode_tracking=False)
+
+        delayed_mask = ~immediate_mask
+        if delayed_mask.any():
+            delayed_env_ids = env_ids[delayed_mask]
+            self._ball_respawn_pending[delayed_env_ids] = True
+            self._ball_respawn_delay_steps[delayed_env_ids] = delay_steps[delayed_mask]
+            self._park_ball_idx(delayed_env_ids)
+
+    def _sample_ball_respawn_delay_steps(self, env_ids: Sequence[int]) -> torch.Tensor:
+        min_delay_s, max_delay_s = self.cfg.ball_respawn_delay_s_range
+        min_delay_s = max(0.0, float(min_delay_s))
+        max_delay_s = max(min_delay_s, float(max_delay_s))
+        if max_delay_s <= 0.0:
+            return torch.zeros(len(env_ids), dtype=torch.long, device=self.device)
+
+        delay_s = sample_uniform(min_delay_s, max_delay_s, len(env_ids), self.device)
+        return torch.ceil(delay_s / self._step_dt).to(dtype=torch.long)
+
+    def _update_ball_respawn_delays(self) -> None:
+        if not self._ball_respawn_pending.any():
+            return
+
+        pending_env_ids = self._ball_respawn_pending.nonzero(as_tuple=False).squeeze(-1)
+        self._ball_respawn_delay_steps[pending_env_ids] -= 1
+
+        due_mask = self._ball_respawn_delay_steps[pending_env_ids] <= 0
+        if due_mask.any():
+            self._reset_ball_idx(pending_env_ids[due_mask], reset_episode_tracking=False)
+
+        still_pending_env_ids = self._ball_respawn_pending.nonzero(as_tuple=False).squeeze(-1)
+        if len(still_pending_env_ids) > 0:
+            self._park_ball_idx(still_pending_env_ids)
+
+    def _park_ball_idx(self, env_ids: Sequence[int]) -> None:
+        self._update_cached_poses(env_ids)
+
         ball_state = self.ball.data.default_root_state[env_ids].clone()
+        ball_state[:, :] = 0.0
+        if self.cfg.ball_respawn_hold_at_disk_center:
+            ball_state[:, 0:3] = self._disk_pos_w[env_ids]
+        else:
+            ball_state[:, 0:3] = self.scene.env_origins[env_ids]
+        ball_state[:, 3:7] = self._identity_quat_wxyz
+
+        self.ball.write_root_state_to_sim(ball_state, env_ids=env_ids)
+        self._update_cached_poses(env_ids)
+        self._local_pose_cache_valid = False
+
+        self._prev_d[env_ids] = torch.norm(self._ball_pos_w[env_ids] - self._disk_pos_w[env_ids], dim=-1)
+        ball_relative = self._ball_pos_w[env_ids] - self._disk_pos_w[env_ids]
+        self._prev_disk_signed_dist[env_ids] = (ball_relative * self._disk_normal_w[env_ids]).sum(dim=-1)
+
+    def _reset_ball_idx(self, env_ids: Sequence[int], reset_episode_tracking: bool) -> None:
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        self._maybe_random_reset_robot_on_ball_reset(env_ids)
+        self._ball_respawn_pending[env_ids] = False
+        self._ball_respawn_delay_steps[env_ids] = 0
+        self.ball.reset(env_ids)
+        ball_state = self.ball.data.default_root_state[env_ids].clone()
+        ball_state[:, :] = 0.0
 
         ball_state[:, 0] = sample_uniform(*self.cfg.ball_spawn_x_range, len(env_ids), self.device)
         ball_state[:, 1] = sample_uniform(*self.cfg.ball_spawn_y_range, len(env_ids), self.device)
@@ -306,9 +529,10 @@ class FirsttrainingEnv(DirectRLEnv):
         # Reset tracking
         ball_relative = self._ball_pos_w[env_ids] - self._disk_pos_w[env_ids]
         self._prev_disk_signed_dist[env_ids] = (ball_relative * self._disk_normal_w[env_ids]).sum(dim=-1)
-        self.pass_through_count[env_ids] = 0.0
-        self.episode_success[env_ids] = False
-        self._passed_this_step[env_ids] = False
+        if reset_episode_tracking:
+            self.pass_through_count[env_ids] = 0.0
+            self.episode_success[env_ids] = False
+            self._passed_this_step[env_ids] = False
 
         self._contact_on_arm[env_ids] = False
 
@@ -351,10 +575,11 @@ def compute_rewards(
     reset_terminated: torch.Tensor,
     passed: torch.Tensor,
     delta_d: torch.Tensor,
+    action_penalty_coeff: torch.Tensor,
 ) -> torch.Tensor:
-    approaching = (delta_d > 0.0).to(dtype=torch.float32)
-    rew_dist = (torch.exp(-2.0 * distance) - 1.0 * distance + 5) * approaching
-    rew_action = -0.5 * torch.sum(actions ** 2, dim=-1)
+
+    rew_dist = (torch.exp(-2.0 * distance) - 1.0 * distance)
+    rew_action = -torch.sum(action_penalty_coeff.unsqueeze(0) * actions ** 2, dim=-1)
     rew_pass = 400.0 * passed.to(dtype=torch.float32)
     rew_termination = -100.0 * reset_terminated.to(dtype=torch.float32)
     return rew_action + rew_pass + rew_termination + rew_dist

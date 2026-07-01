@@ -58,6 +58,18 @@ parser.add_argument(
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument(
+    "--sim_speed",
+    type=float,
+    default=1.0,
+    help="Interactive play speed multiplier. Used by the Isaac Sim dashboard when enabled.",
+)
+parser.add_argument(
+    "--disable_play_ui",
+    action="store_true",
+    default=False,
+    help="Disable the Isaac Sim play dashboard in non-headless play mode.",
+)
+parser.add_argument(
     "--eval_episodes",
     type=int,
     default=0,
@@ -199,11 +211,224 @@ def _tensor_row_to_list(tensor: torch.Tensor, row: int) -> list[float]:
     return tensor[row].detach().cpu().tolist()
 
 
+def _target_error_to_list(target: torch.Tensor, actual: torch.Tensor, row: int) -> list[float]:
+    return (target[row] - actual[row]).detach().cpu().tolist()
+
+
+def _space_size(space_or_size) -> int:
+    shape = getattr(space_or_size, "shape", None)
+    if shape is not None:
+        size = 1
+        for dimension in shape:
+            size *= int(dimension)
+        return size
+    return int(space_or_size)
+
+
 def _success_buffer(base_env, extras):
     success = getattr(base_env, "_last_done_success", None)
     if success is None and isinstance(extras, dict):
         success = extras.get("success", None)
     return success
+
+
+def _tensor_first_row(tensor, default=None) -> list[float] | None:
+    if tensor is None:
+        return default
+    try:
+        return tensor[0].detach().cpu().tolist()
+    except Exception:
+        return default
+
+
+def _max_abs_delta(a: list[float] | None, b: list[float] | None) -> float | None:
+    if a is None or b is None:
+        return None
+    return max(abs(float(x) - float(y)) for x, y in zip(a, b, strict=False))
+
+
+class _PlayDashboard:
+    """Small Isaac Sim overlay for interactive play diagnostics.
+
+    This deliberately avoids TensorBoard or matplotlib so it can run inside the
+    Omniverse UI. If omni.ui is unavailable, the caller simply runs without it.
+    """
+
+    def __init__(self, *, speed: float) -> None:
+        import omni.ui as ui
+
+        self.ui = ui
+        self.paused = False
+        self._step_once = False
+        self._labels: dict[str, object] = {}
+        self._action_labels: list[object] = []
+        self._speed_model = ui.SimpleFloatModel(max(0.0, float(speed)))
+
+        self._window = ui.Window("UR3e Play Dashboard", width=520, height=720)
+        with self._window.frame:
+            with ui.VStack(spacing=6):
+                ui.Label("UR3e Play Dashboard", height=24)
+                with ui.HStack(height=28, spacing=6):
+                    self._pause_button = ui.Button("Pause", clicked_fn=self.toggle_pause)
+                    ui.Button("Step", clicked_fn=self.step_once)
+                ui.Label("Simulation speed", height=20)
+                with ui.HStack(height=24, spacing=6):
+                    ui.FloatSlider(model=self._speed_model, min=0.0, max=4.0)
+                    self._labels["speed"] = ui.Label("1.00x", width=70)
+
+                ui.Separator(height=8)
+                for key in (
+                    "step",
+                    "reward",
+                    "done",
+                    "ball_pos",
+                    "ball_vel",
+                    "disk_pos",
+                    "distance",
+                    "joint_error",
+                ):
+                    self._labels[key] = ui.Label(f"{key}: -", height=20)
+
+                ui.Separator(height=8)
+                ui.Label("Actions [-1, 1]", height=22)
+                for index in range(6):
+                    label = ui.Label(f"a{index}: -", height=22)
+                    self._action_labels.append(label)
+
+    @property
+    def speed(self) -> float:
+        try:
+            return max(0.0, float(self._speed_model.get_value_as_float()))
+        except Exception:
+            return 1.0
+
+    def toggle_pause(self) -> None:
+        self.paused = not self.paused
+        try:
+            self._pause_button.text = "Resume" if self.paused else "Pause"
+        except Exception:
+            pass
+
+    def step_once(self) -> None:
+        self._step_once = True
+
+    def should_step(self) -> bool:
+        if self._step_once:
+            self._step_once = False
+            return True
+        if not self.paused:
+            return self.speed > 0.0
+        return False
+
+    def _set_label(self, key: str, text: str) -> None:
+        label = self._labels.get(key)
+        if label is not None:
+            try:
+                label.text = text
+            except Exception:
+                pass
+
+    def update(self, state: dict) -> None:
+        speed = self.speed
+        self._set_label("speed", f"{speed:.2f}x")
+        self._set_label("step", f"step: {state.get('step', 0)}  sim_t: {state.get('sim_time_s', 0.0):.3f}s")
+        self._set_label("reward", f"reward: {state.get('reward', 0.0): .3f}")
+        self._set_label("done", f"done: {state.get('done', False)}  success: {state.get('success', None)}")
+
+        ball_pos = state.get("ball_pos")
+        ball_vel = state.get("ball_vel")
+        disk_pos = state.get("disk_pos")
+        joint_error = state.get("joint_error")
+        distance = state.get("distance")
+        self._set_label("ball_pos", "ball pos: " + _format_vec(ball_pos, "m"))
+        self._set_label("ball_vel", "ball vel: " + _format_vec(ball_vel, "m/s"))
+        self._set_label("disk_pos", "disk pos: " + _format_vec(disk_pos, "m"))
+        self._set_label("distance", "ball-disk distance: " + ("-" if distance is None else f"{distance:.3f} m"))
+        self._set_label("joint_error", "max |target - q|: " + ("-" if joint_error is None else f"{joint_error:.3f} rad"))
+
+        actions = state.get("actions") or []
+        for index, label in enumerate(self._action_labels):
+            current = actions[index] if index < len(actions) else 0.0
+            try:
+                label.text = f"a{index}: {current:+.3f}"
+            except Exception:
+                pass
+
+
+def _format_vec(values, unit: str) -> str:
+    if values is None:
+        return "-"
+    try:
+        return "[" + ", ".join(f"{float(value):+.3f}" for value in values[:3]) + f"] {unit}"
+    except Exception:
+        return "-"
+
+
+def _play_dashboard_state(base_env, actions, rewards, terminated, truncated, extras, step: int, dt: float) -> dict:
+    action_values = _tensor_first_row(actions, []) if not isinstance(actions, dict) else []
+    reward_value = 0.0
+    try:
+        reward_value = float(rewards.view(-1)[0].detach().cpu().item())
+    except Exception:
+        pass
+
+    done = False
+    try:
+        done = bool((terminated | truncated).view(-1)[0].detach().cpu().item())
+    except Exception:
+        pass
+
+    success_value = None
+    success = _success_buffer(base_env, extras)
+    try:
+        if success is not None:
+            success_value = bool(success.view(-1)[0].detach().cpu().item())
+    except Exception:
+        success_value = None
+
+    ball_pos = _tensor_first_row(getattr(base_env, "_last_step_ball_pos_local", None))
+    if ball_pos is None:
+        ball_pos = _tensor_first_row(getattr(base_env, "_ball_pos_local", None))
+    if ball_pos is None and hasattr(base_env, "ball"):
+        ball_pos = _tensor_first_row(getattr(base_env.ball.data, "root_pos_w", None))
+
+    ball_vel = _tensor_first_row(getattr(base_env, "_last_step_ball_vel_w", None))
+    if ball_vel is None:
+        ball_vel = _tensor_first_row(getattr(base_env, "_ball_vel_w", None))
+    if ball_vel is None and hasattr(base_env, "ball"):
+        ball_vel = _tensor_first_row(getattr(base_env.ball.data, "root_lin_vel_w", None))
+
+    disk_pos = _tensor_first_row(getattr(base_env, "_last_step_disk_pos_local", None))
+    if disk_pos is None:
+        disk_pos = _tensor_first_row(getattr(base_env, "_disk_pos_local", None))
+
+    distance = None
+    if ball_pos is not None and disk_pos is not None:
+        distance = sum((float(ball_pos[index]) - float(disk_pos[index])) ** 2 for index in range(3)) ** 0.5
+
+    joint_pos = _tensor_first_row(getattr(base_env, "_last_step_joint_pos", None))
+    if joint_pos is None and hasattr(base_env, "robot"):
+        try:
+            joint_pos = _tensor_first_row(base_env.robot.data.joint_pos[:, base_env._arm_dof_idx])
+        except Exception:
+            joint_pos = None
+    joint_target = _tensor_first_row(getattr(base_env, "_last_step_joint_pos_target", None))
+    if joint_target is None:
+        joint_target = _tensor_first_row(getattr(base_env, "joint_pos_target", None))
+
+    return {
+        "step": step,
+        "sim_time_s": step * dt,
+        "reward": reward_value,
+        "done": done,
+        "success": success_value,
+        "actions": action_values,
+        "ball_pos": ball_pos,
+        "ball_vel": ball_vel,
+        "disk_pos": disk_pos,
+        "distance": distance,
+        "joint_error": _max_abs_delta(joint_target, joint_pos),
+    }
 
 
 class _DeterministicSkrlPolicy(torch.nn.Module):
@@ -276,7 +501,9 @@ def _record_action_rollouts(
     metadata: dict,
     max_steps: int,
 ) -> None:
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     num_envs = int(getattr(env, "num_envs", base_env.num_envs))
     buffers = [[] for _ in range(num_envs)]
     episode_step = [0 for _ in range(num_envs)]
@@ -298,7 +525,6 @@ def _record_action_rollouts(
 
             joint_pos = base_env.robot.data.joint_pos[:, base_env._arm_dof_idx]
             joint_vel = base_env.robot.data.joint_vel[:, base_env._arm_dof_idx]
-            joint_targets = actions * action_scale
 
             step_records = []
             for env_id in range(num_envs):
@@ -307,7 +533,6 @@ def _record_action_rollouts(
                     "time_s": episode_step[env_id] * dt,
                     "observation": _tensor_row_to_list(obs, env_id),
                     "action_normalized": _tensor_row_to_list(actions, env_id),
-                    "joint_position_target_rad": _tensor_row_to_list(joint_targets, env_id),
                     "joint_position_before_rad": _tensor_row_to_list(joint_pos, env_id),
                     "joint_velocity_before_rad_s": _tensor_row_to_list(joint_vel, env_id),
                 }
@@ -315,10 +540,48 @@ def _record_action_rollouts(
                 step_records.append(record)
 
             obs, rewards, terminated, truncated, extras = env.step(actions)
+            if hasattr(base_env, "_last_step_joint_pos"):
+                joint_pos_after = base_env._last_step_joint_pos
+                joint_vel_after = base_env._last_step_joint_vel
+                disk_pos_after_w = base_env._last_step_disk_pos_w
+                disk_pos_after_local = base_env._last_step_disk_pos_local
+                ball_pos_after_w = base_env._last_step_ball_pos_w
+                ball_pos_after_local = base_env._last_step_ball_pos_local
+                ball_vel_after_w = base_env._last_step_ball_vel_w
+                joint_targets = base_env._last_step_joint_pos_target
+                last_step_valid = base_env._last_step_valid
+                sim_state_after_source = "post_physics_pre_reset_cache"
+            else:
+                joint_pos_after = base_env.robot.data.joint_pos[:, base_env._arm_dof_idx]
+                joint_vel_after = base_env.robot.data.joint_vel[:, base_env._arm_dof_idx]
+                joint_targets = getattr(base_env, "joint_pos_target", actions * action_scale)
+                disk_pos_after_w = getattr(base_env, "_disk_pos_w", torch.zeros(num_envs, 3, device=actions.device))
+                disk_pos_after_local = disk_pos_after_w - base_env.scene.env_origins
+                ball_pos_after_w = getattr(base_env, "_ball_pos_w", torch.zeros(num_envs, 3, device=actions.device))
+                ball_pos_after_local = ball_pos_after_w - base_env.scene.env_origins
+                ball_vel_after_w = getattr(base_env, "_ball_vel_w", torch.zeros(num_envs, 3, device=actions.device))
+                last_step_valid = torch.ones(num_envs, dtype=torch.bool, device=actions.device)
+                sim_state_after_source = "articulation_after_step"
 
         done = (terminated | truncated).view(-1)
         success = _success_buffer(base_env, extras)
         for env_id, record in enumerate(step_records):
+            record["sim_time_after_s"] = (record["step"] + 1) * dt
+            record["joint_position_target_rad"] = _tensor_row_to_list(joint_targets, env_id)
+            record["joint_position_after_rad"] = _tensor_row_to_list(joint_pos_after, env_id)
+            record["joint_velocity_after_rad_s"] = _tensor_row_to_list(joint_vel_after, env_id)
+            record["joint_position_target_error_after_rad"] = _target_error_to_list(
+                joint_targets,
+                joint_pos_after,
+                env_id,
+            )
+            record["disk_position_after_world_m"] = _tensor_row_to_list(disk_pos_after_w, env_id)
+            record["disk_position_after_local_m"] = _tensor_row_to_list(disk_pos_after_local, env_id)
+            record["ball_position_after_world_m"] = _tensor_row_to_list(ball_pos_after_w, env_id)
+            record["ball_position_after_local_m"] = _tensor_row_to_list(ball_pos_after_local, env_id)
+            record["ball_velocity_after_world_m_s"] = _tensor_row_to_list(ball_vel_after_w, env_id)
+            record["sim_state_after_source"] = sim_state_after_source
+            record["sim_state_after_valid"] = bool(last_step_valid[env_id].detach().cpu().item())
             record["reward"] = float(rewards.view(-1)[env_id].detach().cpu().item())
             record["terminated"] = bool(terminated.view(-1)[env_id].detach().cpu().item())
             record["truncated"] = bool(truncated.view(-1)[env_id].detach().cpu().item())
@@ -452,6 +715,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     export_dir = os.path.abspath(args_cli.export_dir) if args_cli.export_dir else os.path.join(log_dir, "exports")
     joint_names = list(getattr(base_env.cfg, "joint_names", []))
     action_scale = float(getattr(base_env.cfg, "action_scale", 1.0))
+    joint_velocity_safe = list(getattr(base_env.cfg, "joint_velocity_safe_rad_s", []))
+    joint_acceleration_safe = list(getattr(base_env.cfg, "joint_acceleration_safe_rad_s2", []))
+    joint_position_lower = list(getattr(base_env.cfg, "joint_position_lower_rad", []))
+    joint_position_upper = list(getattr(base_env.cfg, "joint_position_upper_rad", []))
     metadata = {
         "task": args_cli.task,
         "checkpoint": resume_path,
@@ -460,11 +727,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         "algorithm": algorithm,
         "dt_s": float(dt),
         "num_envs": int(getattr(env, "num_envs", base_env.num_envs)),
-        "observation_space": int(getattr(base_env.cfg, "observation_space", 0)),
-        "action_space": int(getattr(base_env.cfg, "action_space", 0)),
+        "observation_space": _space_size(getattr(base_env.cfg, "observation_space", 0)),
+        "action_space": _space_size(getattr(base_env.cfg, "action_space", 0)),
         "action_scale": action_scale,
         "joint_names": joint_names,
-        "action_semantics": "joint_position_target_rad = action_normalized * action_scale",
+        "action_semantics": getattr(
+            base_env.cfg,
+            "action_semantics",
+            "joint_position_target_rad = action_normalized * action_scale",
+        ),
+        "action_delta_scale_rad": [float(value) * float(dt) for value in joint_velocity_safe],
+        "action_clip": [-1.0, 1.0],
+        "joint_velocity_safe_rad_s": joint_velocity_safe,
+        "joint_acceleration_safe_rad_s2": joint_acceleration_safe,
+        "joint_position_lower_rad": joint_position_lower,
+        "joint_position_upper_rad": joint_position_upper,
+        "legacy_policy_compatibility": "incompatible: retrain policies trained with absolute action targets",
+        "rollout_schema_version": 2,
+        "sim_reference": {
+            "joint_position_field": "joint_position_after_rad",
+            "joint_velocity_field": "joint_velocity_after_rad_s",
+            "time_field": "sim_time_after_s",
+            "source": "post-physics simulator state before done-environment auto-reset",
+        },
     }
 
     if args_cli.export_policy:
@@ -537,10 +822,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         env.close()
         return
 
+    dashboard = None
+    if not bool(getattr(args_cli, "headless", False)) and not args_cli.disable_play_ui and not args_cli.video:
+        try:
+            dashboard = _PlayDashboard(speed=args_cli.sim_speed)
+            print("[INFO] Isaac Sim play dashboard enabled")
+        except Exception as exc:
+            print(f"[WARN] Isaac Sim play dashboard disabled: {exc}")
+
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
+
+        if dashboard is not None and not dashboard.should_step():
+            try:
+                simulation_app.update()
+            except Exception:
+                pass
+            time.sleep(0.02)
+            continue
 
         # run everything in inference mode
         with torch.inference_mode():
@@ -553,16 +854,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
             else:
                 actions = outputs[-1].get("mean_actions", outputs[0])
             # env stepping
-            obs, _, _, _, _ = env.step(actions)
+            obs, rewards, terminated, truncated, extras = env.step(actions)
+        timestep += 1
+
+        if dashboard is not None:
+            dashboard.update(
+                _play_dashboard_state(
+                    base_env,
+                    actions,
+                    rewards,
+                    terminated,
+                    truncated,
+                    extras,
+                    timestep,
+                    float(dt),
+                )
+            )
+
         if args_cli.video:
-            timestep += 1
             # exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
 
-        # time delay for real-time evaluation
-        sleep_time = dt - (time.time() - start_time)
-        if args_cli.real_time and sleep_time > 0:
+        # time delay for real-time evaluation or interactive dashboard speed control.
+        speed = dashboard.speed if dashboard is not None else max(0.0, float(args_cli.sim_speed))
+        target_dt = dt / speed if speed > 0.0 else dt
+        sleep_time = target_dt - (time.time() - start_time)
+        if (args_cli.real_time or dashboard is not None) and sleep_time > 0:
             time.sleep(sleep_time)
 
     # close the simulator

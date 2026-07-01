@@ -8,9 +8,9 @@ models:
     class: GaussianMixin
     clip_actions: False
     clip_log_std: True
-    min_log_std: -20.0
-    max_log_std: 2.0
-    initial_log_std: 0.0
+    min_log_std: -5.0
+    max_log_std: 0.5
+    initial_log_std: -0.5
     network:
       - name: net
         input: OBSERVATIONS
@@ -37,14 +37,19 @@ memory:
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
   class: PPO
-  rollouts: 16
+  rollouts: 32
   learning_epochs: 4
-  mini_batches: 8
+  mini_batches: 16
   discount_factor: 0.995
   gae_lambda: 0.95
-  learning_rate: 5.0e-04
+  learning_rate: 1.0e-04
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
+    kl_threshold: 0.02
+    min_lr: 1.0e-05
+    max_lr: 3.0e-04
+    kl_factor: 2.0
+    lr_factor: 1.25
   kl_threshold: 0.02
   observation_preprocessor: RunningStandardScaler
   observation_preprocessor_kwargs: null
@@ -52,10 +57,10 @@ agent:
   value_preprocessor_kwargs: null
   random_timesteps: 0
   learning_starts: 0
-  grad_norm_clip: 1.0
+  grad_norm_clip: 0.5
   ratio_clip: 0.2
   value_clip: 0.2
-  entropy_loss_scale: 0.02
+  entropy_loss_scale: 0.005
   value_loss_scale: 0.5
   rewards_shaper_scale: 1.0
   time_limit_bootstrap: False
@@ -71,5 +76,5 @@ agent:
 # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 200000
+  timesteps: 400000
   environment_info: log
