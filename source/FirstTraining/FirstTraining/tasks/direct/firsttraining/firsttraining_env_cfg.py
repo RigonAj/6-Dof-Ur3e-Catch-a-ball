@@ -104,7 +104,7 @@ class FirsttrainingEnvCfg(DirectRLEnvCfg):
     disk_link_name = "wrist_3_link"
     disk_prim_rel_path = "ur3e/wrist_3_link/Hoop/node_/Disk"
     disk_local_normal_axis = (0.0, 0.0, 1.0)
-    disk_radius = 0.1
+    disk_radius = 0.05
     ball_spawn_x_range = (-0.6, -0.2)
     ball_spawn_y_range = (1.2, 2.1)
     ball_spawn_z_range = (0.5, 1.2)
