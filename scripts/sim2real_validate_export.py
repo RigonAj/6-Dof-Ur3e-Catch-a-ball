@@ -121,6 +121,20 @@ def _validate_metadata(metadata: dict[str, Any], source: str, allow_legacy: bool
     ):
         _require_vector(metadata, key, 6, errors)
 
+    # Optional (older exports lack it): the racket hold side must be a known
+    # value and agree with the sign of the disk offset on wrist_3 X.
+    hold_side = metadata.get("hold_side")
+    if hold_side is not None:
+        _require(hold_side in ("right", "left"), f"{source}: hold_side must be 'right' or 'left'", errors)
+        disk_offset = metadata.get("disk_offset_wrist_3_link_m")
+        if hold_side in ("right", "left") and isinstance(disk_offset, list) and len(disk_offset) == 3:
+            expected_sign = -1.0 if hold_side == "right" else 1.0
+            _require(
+                float(disk_offset[0]) * expected_sign > 0.0,
+                f"{source}: disk_offset_wrist_3_link_m x={disk_offset[0]} does not match hold_side={hold_side!r}",
+                errors,
+            )
+
 
 def _validate_rollout(path: Path, allow_legacy: bool, errors: list[str]) -> None:
     payload = _load_json(path)

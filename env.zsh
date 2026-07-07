@@ -3,19 +3,35 @@
 
 source ~/env_isaaclab/bin/activate
 
-unalias train play play_latest play_best evaluate record sim2real_export sim2real_validate tensorboard checkpoint latest_checkpoint best_checkpoint 2>/dev/null || true
+unalias train play play_latest play_best train-left train-right play-left play-right evaluate record sim2real_export sim2real_validate tensorboard checkpoint latest_checkpoint best_checkpoint 2>/dev/null || true
 
-CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-logs/skrl/cartpole_direct}
+# Task selection: FT_TASK=Template-Firsttraining-Direct-Left-v0 train
+# switches every command (train/play/evaluate/record/sim2real_export) to the
+# left-hand variant. Checkpoints of the Left task land in a separate log root
+# unless CHECKPOINT_ROOT is set explicitly.
+_ft_task() {
+  echo "${FT_TASK:-Template-Firsttraining-Direct-v0}"
+}
+
+_checkpoint_root() {
+  if [[ -n "$CHECKPOINT_ROOT" ]]; then
+    echo "$CHECKPOINT_ROOT"
+  elif [[ "$(_ft_task)" == *-Left-* ]]; then
+    echo "logs/skrl/cartpole_direct_left"
+  else
+    echo "logs/skrl/cartpole_direct"
+  fi
+}
 
 latest_checkpoint() {
   local checkpoint
-  checkpoint=$(find "$CHECKPOINT_ROOT" \( -path '*/checkpoints/best_agent.pt' -o -path '*/checkpoints/agent_*.pt' \) -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 {sub(/^[^ ]+ /, ""); print; exit}')
+  checkpoint=$(find "$(_checkpoint_root)" \( -path '*/checkpoints/best_agent.pt' -o -path '*/checkpoints/agent_*.pt' \) -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 {sub(/^[^ ]+ /, ""); print; exit}')
   echo "$checkpoint"
 }
 
 best_checkpoint() {
   local checkpoint
-  checkpoint=$(find "$CHECKPOINT_ROOT" -path '*/checkpoints/best_agent.pt' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 {sub(/^[^ ]+ /, ""); print; exit}')
+  checkpoint=$(find "$(_checkpoint_root)" -path '*/checkpoints/best_agent.pt' -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 {sub(/^[^ ]+ /, ""); print; exit}')
   if [[ -z "$checkpoint" ]]; then
     checkpoint=$(latest_checkpoint)
   fi
@@ -23,7 +39,7 @@ best_checkpoint() {
 }
 
 latest_export_dir() {
-  find "$CHECKPOINT_ROOT" -path '*/exports/policy_metadata.json' -printf '%T@ %h\n' 2>/dev/null | sort -nr | awk 'NR == 1 {sub(/^[^ ]+ /, ""); print; exit}'
+  find "$(_checkpoint_root)" -path '*/exports/policy_metadata.json' -printf '%T@ %h\n' 2>/dev/null | sort -nr | awk 'NR == 1 {sub(/^[^ ]+ /, ""); print; exit}'
 }
 
 _resolve_checkpoint() {
@@ -58,7 +74,7 @@ _first_arg_is_checkpoint_selector() {
 _require_checkpoint_file() {
   local checkpoint="$1"
   if [[ -z "$checkpoint" ]]; then
-    echo "[script.zsh] Error: no checkpoint found in $CHECKPOINT_ROOT"
+    echo "[script.zsh] Error: no checkpoint found in $(_checkpoint_root)"
     return 1
   fi
   if [[ ! -f "$checkpoint" ]]; then
@@ -77,14 +93,14 @@ checkpoint() {
 
 CHECKPOINT=$(latest_checkpoint)
 if [[ -z "$CHECKPOINT" ]]; then
-  echo "[script.zsh] Warning: no checkpoint found in $CHECKPOINT_ROOT; play/record/evaluate may fail"
+  echo "[script.zsh] Warning: no checkpoint found in $(_checkpoint_root); play/record/evaluate may fail"
 else
   echo "[script.zsh] Checkpoint: $CHECKPOINT"
 fi
 
 train() {
   MANGOHUD=0 DISABLE_MANGOHUD=1 HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/train.py \
-  --task Template-Firsttraining-Direct-v0 \
+  --task "$(_ft_task)" \
   --num_envs=12000 \
   --headless \
   --livestream 0 \
@@ -97,7 +113,7 @@ play() {
   local checkpoint
   if _uses_checkpoint_arg "$@"; then
     MANGOHUD=0 DISABLE_MANGOHUD=1 python scripts/skrl/play.py \
-    --task Template-Firsttraining-Direct-v0 \
+    --task "$(_ft_task)" \
     --num_envs=1 \
     "$@"
     return $?
@@ -111,7 +127,7 @@ play() {
   _require_checkpoint_file "$checkpoint" || return 1
   echo "[script.zsh] Checkpoint: $checkpoint"
   MANGOHUD=0 DISABLE_MANGOHUD=1 python scripts/skrl/play.py \
-  --task Template-Firsttraining-Direct-v0 \
+  --task "$(_ft_task)" \
   --num_envs=1 \
   --checkpoint="$checkpoint" \
   "$@"
@@ -125,13 +141,31 @@ play_best() {
   play best "$@"
 }
 
+# Hold-side shortcuts: same commands pinned to one task variant. They also
+# select the matching checkpoint root (cartpole_direct vs cartpole_direct_left).
+train-left() {
+  FT_TASK=Template-Firsttraining-Direct-Left-v0 train "$@"
+}
+
+train-right() {
+  FT_TASK=Template-Firsttraining-Direct-v0 train "$@"
+}
+
+play-left() {
+  FT_TASK=Template-Firsttraining-Direct-Left-v0 play "$@"
+}
+
+play-right() {
+  FT_TASK=Template-Firsttraining-Direct-v0 play "$@"
+}
+
 evaluate() {
   local checkpoint
   checkpoint=$(latest_checkpoint)
   _require_checkpoint_file "$checkpoint" || return 1
   echo "[script.zsh] Checkpoint: $checkpoint"
   MANGOHUD=0 DISABLE_MANGOHUD=1 HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/play.py \
-  --task Template-Firsttraining-Direct-v0 \
+  --task "$(_ft_task)" \
   --num_envs=512 \
   --checkpoint="$checkpoint" \
   --headless \
@@ -147,7 +181,7 @@ record() {
   _require_checkpoint_file "$checkpoint" || return 1
   echo "[script.zsh] Checkpoint: $checkpoint"
   MANGOHUD=0 DISABLE_MANGOHUD=1 python scripts/skrl/play.py \
-  --task Template-Firsttraining-Direct-v0 \
+  --task "$(_ft_task)" \
   --num_envs=32 \
   --checkpoint="$checkpoint" \
   --video \
@@ -165,7 +199,7 @@ sim2real_export() {
   echo "[script.zsh] Checkpoint: $checkpoint"
   echo "[script.zsh] Recording sim2real episodes: $episodes"
   MANGOHUD=0 DISABLE_MANGOHUD=1 HEADLESS=1 LIVESTREAM=0 ENABLE_CAMERAS=0 python scripts/skrl/play.py \
-  --task Template-Firsttraining-Direct-v0 \
+  --task "$(_ft_task)" \
   --num_envs=1 \
   --checkpoint="$checkpoint" \
   --headless \

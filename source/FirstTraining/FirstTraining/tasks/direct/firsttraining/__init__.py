@@ -21,3 +21,15 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
+
+# Left-hand variant: racket rotated 180 deg about wrist_3 Z, ball distribution
+# mirrored across the yz plane (x -> -x). Same observation/action contract.
+gym.register(
+    id="Template-Firsttraining-Direct-Left-v0",
+    entry_point=f"{__name__}.firsttraining_env:FirsttrainingEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.firsttraining_env_cfg:FirsttrainingEnvCfgLeft",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg_left.yaml",
+    },
+)

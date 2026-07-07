@@ -35,6 +35,8 @@ class FirsttrainingEnv(DirectRLEnv):
         self._last_done_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._zero_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.actions = torch.zeros(self.num_envs, len(self.cfg.joint_names), device=self.device)
+        self.raw_actions = torch.zeros_like(self.actions)
+        self.prev_actions = torch.zeros_like(self.actions)
         self.joint_pos_target = torch.zeros_like(self.actions)
         self._action_penalty_coeff = torch.zeros(len(self.cfg.joint_names), device=self.device)
         self._joint_action_penalty_coeff_ranges = torch.tensor(
@@ -74,6 +76,17 @@ class FirsttrainingEnv(DirectRLEnv):
         ).unsqueeze(0)
         self._prev_d = torch.zeros(self.num_envs, device=self.device)
         self._identity_quat_wxyz = torch.tensor((1.0, 0.0, 0.0, 0.0), device=self.device)
+
+        # Ring buffers for the delayed ball observation (perception latency model).
+        delay_min, delay_max = self.cfg.ball_obs_delay_steps_range
+        self._ball_obs_delay_min = max(0, int(delay_min))
+        self._ball_obs_delay_max = max(self._ball_obs_delay_min, int(delay_max))
+        self._ball_obs_buf_len = self._ball_obs_delay_max + 1
+        self._ball_obs_pos_buf = torch.zeros(self._ball_obs_buf_len, self.num_envs, 3, device=self.device)
+        self._ball_obs_vel_buf = torch.zeros_like(self._ball_obs_pos_buf)
+        self._ball_obs_head = 0
+        self._ball_obs_delay_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._env_index = torch.arange(self.num_envs, device=self.device)
 
         # Cached per-step tensors (filled in _pre_physics_step)
         self._disk_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
@@ -237,6 +250,8 @@ class FirsttrainingEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self._update_ball_respawn_delays()
+        self.prev_actions.copy_(self.actions)
+        self.raw_actions.copy_(actions)
         self.actions.copy_(torch.clamp(actions, -1.0, 1.0))
 
         reference_q = self._reference_joint_pos_target.copy_(self.joint_pos_target)
@@ -287,14 +302,20 @@ class FirsttrainingEnv(DirectRLEnv):
         if not self._local_pose_cache_valid:
             self._update_local_pose_tensors()
 
+        # The policy sees a delayed + noisy ball; direction/distance are derived
+        # from that perceived ball and the true disk pose (as on the real robot).
+        ball_pos_obs, ball_vel_obs = self._sample_ball_observation()
+        direction_obs = ball_pos_obs - self._disk_pos_local
+        distance_obs = torch.linalg.vector_norm(direction_obs, dim=-1, keepdim=True)
+
         obs = torch.cat([
             joint_pos,                                      # 6
             joint_vel,                                      # 6
             self._disk_pos_local,                           # 3
-            self._ball_pos_local,                           # 3
-            self._direction,                                # 3
-            self._distance,                                 # 1
-            self._ball_vel_w,                               # 3
+            ball_pos_obs,                                   # 3
+            direction_obs,                                  # 3
+            distance_obs,                                   # 1
+            ball_vel_obs,                                   # 3
             (self._prev_disk_signed_dist > 0.0).float().unsqueeze(-1),  # 1
             self.actions,                                   # 6
             self.pass_through_count.unsqueeze(-1),          # 1
@@ -305,30 +326,69 @@ class FirsttrainingEnv(DirectRLEnv):
 
         return {"policy": obs}
 
+    def _sample_ball_observation(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Delayed and noisy view of the ball, used only by the policy observation."""
+        self._ball_obs_head = (self._ball_obs_head + 1) % self._ball_obs_buf_len
+        self._ball_obs_pos_buf[self._ball_obs_head].copy_(self._ball_pos_local)
+        self._ball_obs_vel_buf[self._ball_obs_head].copy_(self._ball_vel_w)
+
+        read_idx = (self._ball_obs_head - self._ball_obs_delay_steps) % self._ball_obs_buf_len
+        ball_pos_obs = self._ball_obs_pos_buf[read_idx, self._env_index]
+        ball_vel_obs = self._ball_obs_vel_buf[read_idx, self._env_index]
+
+        pos_noise_std = float(self.cfg.ball_obs_position_noise_std)
+        vel_noise_std = float(self.cfg.ball_obs_velocity_noise_std)
+        if pos_noise_std > 0.0:
+            ball_pos_obs = ball_pos_obs + torch.randn_like(ball_pos_obs) * pos_noise_std
+        if vel_noise_std > 0.0:
+            ball_vel_obs = ball_vel_obs + torch.randn_like(ball_vel_obs) * vel_noise_std
+        return ball_pos_obs, ball_vel_obs
+
+    def _reset_ball_observation_idx(self, env_ids: torch.Tensor) -> None:
+        """Refill the delay buffers with the fresh ball state and resample per-env delays."""
+        if self._ball_obs_delay_max > self._ball_obs_delay_min:
+            self._ball_obs_delay_steps[env_ids] = torch.randint(
+                self._ball_obs_delay_min,
+                self._ball_obs_delay_max + 1,
+                (len(env_ids),),
+                device=self.device,
+            )
+        else:
+            self._ball_obs_delay_steps[env_ids] = self._ball_obs_delay_min
+
+        ball_pos_local = self._ball_pos_w[env_ids] - self.scene.env_origins[env_ids]
+        self._ball_obs_pos_buf[:, env_ids] = ball_pos_local.unsqueeze(0)
+        self._ball_obs_vel_buf[:, env_ids] = self._ball_vel_w[env_ids].unsqueeze(0)
+
     def _get_rewards(self) -> torch.Tensor:
         self._update_local_pose_tensors()
         self._delta_d.copy_(self._prev_d).sub_(self._distance[:, 0])
         self._prev_d.copy_(self._distance[:, 0])
 
-        action_penalty_coeff = self._get_action_penalty_coeff()
+        warmup_progress = self._get_action_penalty_warmup_progress()
+        action_penalty_coeff = self._get_action_penalty_coeff(warmup_progress)
         return compute_rewards(
             self._distance[:, 0],
             self.actions,
+            self.raw_actions,
+            self.prev_actions,
             self.reset_terminated,
             self._passed_this_step,
             self._delta_d,
             action_penalty_coeff,
+            float(self.cfg.action_saturation_penalty_coeff),
+            float(self.cfg.action_smoothness_penalty_coeff) * warmup_progress,
         )
 
-    def _get_action_penalty_coeff(self) -> torch.Tensor:
+    def _get_action_penalty_warmup_progress(self) -> float:
         warmup_steps = int(self.cfg.action_penalty_warmup_steps)
         if warmup_steps <= 0:
-            smooth_progress = 1.0
-        else:
-            raw_progress = float(getattr(self, "common_step_counter", 0)) / float(warmup_steps)
-            progress = min(max(raw_progress, 0.0), 1.0)
-            smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+            return 1.0
+        raw_progress = float(getattr(self, "common_step_counter", 0)) / float(warmup_steps)
+        progress = min(max(raw_progress, 0.0), 1.0)
+        return progress * progress * (3.0 - 2.0 * progress)
 
+    def _get_action_penalty_coeff(self, smooth_progress: float) -> torch.Tensor:
         if self.cfg.use_per_joint_action_penalty:
             coeff_start = self._joint_action_penalty_coeff_ranges[:, 0]
             coeff_end = self._joint_action_penalty_coeff_ranges[:, 1]
@@ -411,6 +471,8 @@ class FirsttrainingEnv(DirectRLEnv):
         joint_vel = torch.zeros_like(joint_pos)
 
         self.actions[env_ids] = 0.0
+        self.raw_actions[env_ids] = 0.0
+        self.prev_actions[env_ids] = 0.0
         self.joint_pos_target[env_ids] = joint_pos
         self._previous_joint_cmd_vel[env_ids] = 0.0
         self.robot.set_joint_position_target(joint_pos, env_ids=env_ids, joint_ids=self._arm_dof_idx)
@@ -419,6 +481,8 @@ class FirsttrainingEnv(DirectRLEnv):
     def _sync_robot_targets_to_current_pose(self, env_ids: Sequence[int]) -> None:
         joint_pos = self.robot.data.joint_pos[env_ids][:, self._arm_dof_idx].clone()
         self.actions[env_ids] = 0.0
+        self.raw_actions[env_ids] = 0.0
+        self.prev_actions[env_ids] = 0.0
         self.joint_pos_target[env_ids] = joint_pos
         self._previous_joint_cmd_vel[env_ids] = 0.0
         self.robot.set_joint_position_target(joint_pos, env_ids=env_ids, joint_ids=self._arm_dof_idx)
@@ -522,6 +586,7 @@ class FirsttrainingEnv(DirectRLEnv):
         self.ball.write_root_state_to_sim(ball_state, env_ids=env_ids)
         self._update_cached_poses(env_ids)
         self._local_pose_cache_valid = False
+        self._reset_ball_observation_idx(env_ids)
 
         # Initialize _prev_d with the real distance at reset.
         self._prev_d[env_ids] = torch.norm(self._ball_pos_w[env_ids] - self._disk_pos_w[env_ids], dim=-1)
@@ -572,14 +637,24 @@ def detect_pass_through(
 def compute_rewards(
     distance: torch.Tensor,
     actions: torch.Tensor,
+    raw_actions: torch.Tensor,
+    prev_actions: torch.Tensor,
     reset_terminated: torch.Tensor,
     passed: torch.Tensor,
     delta_d: torch.Tensor,
     action_penalty_coeff: torch.Tensor,
+    saturation_penalty_coeff: float,
+    smoothness_penalty_coeff: float,
 ) -> torch.Tensor:
 
     rew_dist = (torch.exp(-2.0 * distance) - 1.0 * distance)
     rew_action = -torch.sum(action_penalty_coeff.unsqueeze(0) * actions ** 2, dim=-1)
+    # Boundary penalty on the raw (pre-clip) action: unlike the clipped-action
+    # penalty above, it stays differentiated when the policy mean saturates
+    # past ±1 and is the term that can pull saturated means back toward zero.
+    raw_excess = torch.relu(raw_actions.abs() - 1.0)
+    rew_saturation = -saturation_penalty_coeff * torch.sum(raw_excess ** 2, dim=-1)
+    rew_smooth = -smoothness_penalty_coeff * torch.sum((actions - prev_actions) ** 2, dim=-1)
     rew_pass = 400.0 * passed.to(dtype=torch.float32)
     rew_termination = -100.0 * reset_terminated.to(dtype=torch.float32)
-    return rew_action + rew_pass + rew_termination + rew_dist
+    return rew_action + rew_saturation + rew_smooth + rew_pass + rew_termination + rew_dist

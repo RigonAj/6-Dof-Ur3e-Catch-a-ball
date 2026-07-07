@@ -719,6 +719,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     joint_acceleration_safe = list(getattr(base_env.cfg, "joint_acceleration_safe_rad_s2", []))
     joint_position_lower = list(getattr(base_env.cfg, "joint_position_lower_rad", []))
     joint_position_upper = list(getattr(base_env.cfg, "joint_position_upper_rad", []))
+    disk_offset_b = [float(v) for v in base_env._disk_offset_b[0].tolist()]
+    disk_normal_b = [float(v) for v in base_env._disk_normal_b[0].tolist()]
     metadata = {
         "task": args_cli.task,
         "checkpoint": resume_path,
@@ -742,6 +744,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         "joint_acceleration_safe_rad_s2": joint_acceleration_safe,
         "joint_position_lower_rad": joint_position_lower,
         "joint_position_upper_rad": joint_position_upper,
+        # Which side the racket is mounted on (seen from in front of the
+        # robot); a deployed model must match the physical mount and the
+        # hoop_center TF side.
+        "hold_side": getattr(base_env.cfg, "hold_side", "right"),
+        "disk_link_name": getattr(base_env.cfg, "disk_link_name", "wrist_3_link"),
+        "disk_offset_wrist_3_link_m": disk_offset_b,
+        "disk_normal_wrist_3_link": disk_normal_b,
+        "disk_radius_m": float(base_env._disk_radius),
+        "ball_spawn_ranges_m": {
+            "x": list(getattr(base_env.cfg, "ball_spawn_x_range", [])),
+            "y": list(getattr(base_env.cfg, "ball_spawn_y_range", [])),
+            "z": list(getattr(base_env.cfg, "ball_spawn_z_range", [])),
+        },
+        "ball_position_noise_std_m": float(getattr(base_env.cfg, "ball_position_noise_std", 0.0)),
+        "ball_velocity_ranges_m_s": {
+            "x": list(getattr(base_env.cfg, "ball_velocity_x_range", [])),
+            "y": list(getattr(base_env.cfg, "ball_velocity_y_range", [])),
+            "z": list(getattr(base_env.cfg, "ball_velocity_z_range", [])),
+        },
+        "gravity_m_s2": [float(v) for v in getattr(base_env.cfg.sim, "gravity", (0.0, 0.0, -9.81))],
+        "observation_frame": "base_link",
+        "ball_position_frame": "base_link",
+        "disk_position_frame": "base_link",
+        "ball_velocity_frame": "world",
         "legacy_policy_compatibility": "incompatible: retrain policies trained with absolute action targets",
         "rollout_schema_version": 2,
         "sim_reference": {
